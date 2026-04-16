@@ -17,6 +17,14 @@ RESET='\033[0m'
 #  全局变量
 # ========================================
 
+MICROSOCKS_REPO="https://github.com/rofl0r/microsocks/archive/refs/heads/master.tar.gz"
+MICROSOCKS_BIN="/usr/local/bin/microsocks"
+MICROSOCKS_SRC="/tmp/microsocks-master"
+
+SVC_NAME="microsocks"
+SVC_FILE_SYSTEMD="/etc/systemd/system/microsocks.service"
+SVC_FILE_OPENRC="/etc/init.d/microsocks"
+
 CRED_FILE="/root/.socks5_info"
 SCRIPT_PATH="/usr/local/bin/socks"
 
@@ -24,11 +32,6 @@ OS_ID="unknown"
 OS_FAMILY=""
 PKG_MGR=""
 INIT_SYS="unknown"
-
-SVC_NAME="danted"
-CONF_FILE="/etc/danted.conf"
-SOCKD_BIN="/usr/sbin/danted"
-PKG_NAME="dante-server"
 
 SOCKS_PORT=""
 SOCKS_USER=""
@@ -49,7 +52,7 @@ pause() {
 
 banner() {
   command -v clear >/dev/null 2>&1 && clear 2>/dev/null || true
-  echo -e "${BOLD}${CYAN}  SOCKS5 管理面板${RESET} ${DIM}(${OS_ID})${RESET}"
+  echo -e "${BOLD}${CYAN}  SOCKS5 管理面板${RESET} ${DIM}(microsocks | ${OS_ID})${RESET}"
   echo "  ----------------------------------------"
   echo ""
 }
@@ -79,83 +82,26 @@ detect_os() {
 
   case "${OS_ID}" in
     debian|ubuntu|linuxmint|pop|kali|deepin|raspbian)
-      OS_FAMILY="debian"
-      PKG_MGR="apt"
-      SVC_NAME="danted"
-      CONF_FILE="/etc/danted.conf"
-      SOCKD_BIN="/usr/sbin/danted"
-      PKG_NAME="dante-server"
-      ;;
-    centos|rhel|almalinux|rocky|ol|amzn|scientific|eurolinux)
-      OS_FAMILY="rhel"
-      PKG_MGR="yum"
-      command_exists dnf && PKG_MGR="dnf"
-      SVC_NAME="sockd"
-      CONF_FILE="/etc/sockd.conf"
-      SOCKD_BIN="/usr/sbin/sockd"
-      PKG_NAME="dante-server"
-      ;;
+      OS_FAMILY="debian"; PKG_MGR="apt" ;;
+    centos|rhel|almalinux|rocky|ol|amzn|scientific)
+      OS_FAMILY="rhel"; PKG_MGR="yum"
+      command_exists dnf && PKG_MGR="dnf" ;;
     fedora)
-      OS_FAMILY="fedora"
-      PKG_MGR="dnf"
-      SVC_NAME="sockd"
-      CONF_FILE="/etc/sockd.conf"
-      SOCKD_BIN="/usr/sbin/sockd"
-      PKG_NAME="dante-server"
-      ;;
+      OS_FAMILY="fedora"; PKG_MGR="dnf" ;;
     alpine)
-      OS_FAMILY="alpine"
-      PKG_MGR="apk"
-      SVC_NAME="sockd"
-      CONF_FILE="/etc/sockd.conf"
-      SOCKD_BIN="/usr/sbin/sockd"
-      PKG_NAME="dante-server"
-      ;;
+      OS_FAMILY="alpine"; PKG_MGR="apk" ;;
     arch|manjaro|endeavouros|garuda)
-      OS_FAMILY="arch"
-      PKG_MGR="pacman"
-      SVC_NAME="sockd"
-      CONF_FILE="/etc/sockd.conf"
-      SOCKD_BIN="/usr/bin/sockd"
-      PKG_NAME="dante"
-      ;;
+      OS_FAMILY="arch"; PKG_MGR="pacman" ;;
     opensuse*|sles|suse)
-      OS_FAMILY="suse"
-      PKG_MGR="zypper"
-      SVC_NAME="sockd"
-      CONF_FILE="/etc/sockd.conf"
-      SOCKD_BIN="/usr/sbin/sockd"
-      PKG_NAME="dante-server"
-      ;;
+      OS_FAMILY="suse"; PKG_MGR="zypper" ;;
     *)
-      if command_exists apt-get; then
-        OS_FAMILY="debian"; PKG_MGR="apt"
-        SVC_NAME="danted"; CONF_FILE="/etc/danted.conf"
-        SOCKD_BIN="/usr/sbin/danted"; PKG_NAME="dante-server"
-      elif command_exists dnf; then
-        OS_FAMILY="rhel"; PKG_MGR="dnf"
-        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
-      elif command_exists yum; then
-        OS_FAMILY="rhel"; PKG_MGR="yum"
-        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
-      elif command_exists apk; then
-        OS_FAMILY="alpine"; PKG_MGR="apk"
-        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
-      elif command_exists pacman; then
-        OS_FAMILY="arch"; PKG_MGR="pacman"
-        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/bin/sockd"; PKG_NAME="dante"
-      elif command_exists zypper; then
-        OS_FAMILY="suse"; PKG_MGR="zypper"
-        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
-      else
-        err "无法识别系统"
-        exit 1
-      fi
+      if command_exists apt-get; then     OS_FAMILY="debian";  PKG_MGR="apt"
+      elif command_exists dnf; then       OS_FAMILY="rhel";    PKG_MGR="dnf"
+      elif command_exists yum; then       OS_FAMILY="rhel";    PKG_MGR="yum"
+      elif command_exists apk; then       OS_FAMILY="alpine";  PKG_MGR="apk"
+      elif command_exists pacman; then    OS_FAMILY="arch";    PKG_MGR="pacman"
+      elif command_exists zypper; then    OS_FAMILY="suse";    PKG_MGR="zypper"
+      else err "无法识别系统"; exit 1; fi
       ;;
   esac
 
@@ -170,6 +116,10 @@ detect_os() {
   return 0
 }
 
+# ========================================
+#  凭据 读/写
+# ========================================
+
 save_cred() {
   cat > "${CRED_FILE}" <<EOF
 SOCKS_PORT='${SOCKS_PORT}'
@@ -182,83 +132,31 @@ EOF
 
 load_cred() {
   if [[ -f "${CRED_FILE}" ]]; then
-    # shellcheck disable=SC1090
     . "${CRED_FILE}"
     return 0
   fi
   return 1
 }
 
-get_default_if() {
-  local iface=""
-  iface="$(ip route get 8.8.8.8 2>/dev/null \
-    | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-  if [[ -z "${iface}" ]]; then
-    iface="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')"
-  fi
-  echo "${iface}"
-}
+# ========================================
+#  网络工具
+# ========================================
 
 get_local_ip() {
-  local ipaddr=""
-  ipaddr="$(ip route get 8.8.8.8 2>/dev/null \
+  local ip=""
+  ip="$(ip route get 8.8.8.8 2>/dev/null \
     | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  if [[ -z "${ipaddr}" ]]; then
-    ipaddr="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  fi
-  echo "${ipaddr}"
-}
-
-svc_is_active() {
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl is-active --quiet "${SVC_NAME}"
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    rc-service "${SVC_NAME}" status >/dev/null 2>&1
-  else
-    return 1
-  fi
-}
-
-svc_enable() {
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl enable "${SVC_NAME}" >/dev/null 2>&1 || true
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    rc-update add "${SVC_NAME}" default >/dev/null 2>&1 || true
-  fi
-  return 0
-}
-
-svc_start() {
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl restart "${SVC_NAME}"
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    rc-service "${SVC_NAME}" restart || rc-service "${SVC_NAME}" start
-  else
-    err "不支持的 init 系统"
-    return 1
-  fi
-}
-
-svc_stop() {
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl stop "${SVC_NAME}" >/dev/null 2>&1 || true
-    systemctl disable "${SVC_NAME}" >/dev/null 2>&1 || true
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    rc-service "${SVC_NAME}" stop >/dev/null 2>&1 || true
-    rc-update del "${SVC_NAME}" default >/dev/null 2>&1 || true
-  fi
-  return 0
+  [[ -z "${ip}" ]] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  echo "${ip}"
 }
 
 open_firewall_port() {
   local port="$1"
   if command_exists ufw; then
     ufw allow "${port}/tcp" >/dev/null 2>&1 || true
-    ufw allow "${port}/udp" >/dev/null 2>&1 || true
   fi
   if command_exists firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
   return 0
@@ -268,11 +166,9 @@ close_firewall_port() {
   local port="$1"
   if command_exists ufw; then
     ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
-    ufw delete allow "${port}/udp" >/dev/null 2>&1 || true
   fi
   if command_exists firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null 2>&1 || true
-    firewall-cmd --permanent --remove-port="${port}/udp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
   return 0
@@ -287,123 +183,205 @@ gen_port() {
 }
 
 gen_user() {
-  local suffix
-  suffix="$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || true)"
-  [[ -n "${suffix}" ]] || suffix="$RANDOM"
-  echo "socks${suffix}"
+  local s
+  s="$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || true)"
+  [[ -n "${s}" ]] || s="$RANDOM"
+  echo "user${s}"
 }
 
 gen_pass() {
   local p
   p="$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || true)"
-  [[ -n "${p}" ]] || p="Socks$(date +%s)$RANDOM"
+  [[ -n "${p}" ]] || p="Pass$(date +%s)$RANDOM"
   echo "${p}"
 }
 
 # ========================================
-#  安装相关
+#  服务管理
 # ========================================
 
-install_packages() {
+write_systemd_unit() {
+  local port="$1" user="$2" pass="$3"
+
+  cat > "${SVC_FILE_SYSTEMD}" <<EOF
+[Unit]
+Description=MicroSocks SOCKS5 Proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${MICROSOCKS_BIN} -p ${port} -u ${user} -P ${pass}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  return 0
+}
+
+write_openrc_init() {
+  local port="$1" user="$2" pass="$3"
+
+  cat > "${SVC_FILE_OPENRC}" <<'HEAD'
+#!/sbin/openrc-run
+
+description="MicroSocks SOCKS5 Proxy"
+command="/usr/local/bin/microsocks"
+HEAD
+
+  cat >> "${SVC_FILE_OPENRC}" <<EOF
+command_args="-p ${port} -u ${user} -P ${pass}"
+command_background=true
+pidfile="/run/microsocks.pid"
+
+depend() {
+  need net
+}
+EOF
+
+  chmod +x "${SVC_FILE_OPENRC}"
+  return 0
+}
+
+write_service() {
+  local port="$1" user="$2" pass="$3"
+
+  if [[ "${INIT_SYS}" == "systemd" ]]; then
+    write_systemd_unit "${port}" "${user}" "${pass}"
+  elif [[ "${INIT_SYS}" == "openrc" ]]; then
+    write_openrc_init "${port}" "${user}" "${pass}"
+  fi
+  return 0
+}
+
+svc_is_active() {
+  if [[ "${INIT_SYS}" == "systemd" ]]; then
+    systemctl is-active --quiet "${SVC_NAME}" 2>/dev/null
+  elif [[ "${INIT_SYS}" == "openrc" ]]; then
+    rc-service "${SVC_NAME}" status >/dev/null 2>&1
+  else
+    pgrep -x microsocks >/dev/null 2>&1
+  fi
+}
+
+svc_enable_start() {
+  if [[ "${INIT_SYS}" == "systemd" ]]; then
+    systemctl enable "${SVC_NAME}" >/dev/null 2>&1 || true
+    systemctl restart "${SVC_NAME}"
+  elif [[ "${INIT_SYS}" == "openrc" ]]; then
+    rc-update add "${SVC_NAME}" default >/dev/null 2>&1 || true
+    rc-service "${SVC_NAME}" restart 2>/dev/null || rc-service "${SVC_NAME}" start
+  else
+    # 无 init 系统，直接后台运行
+    pkill -x microsocks >/dev/null 2>&1 || true
+    sleep 0.3
+    nohup "${MICROSOCKS_BIN}" -p "${SOCKS_PORT}" -u "${SOCKS_USER}" -P "${SOCKS_PASS}" \
+      >/dev/null 2>&1 &
+    msg "已后台启动 (PID $!)"
+  fi
+  return 0
+}
+
+svc_stop_disable() {
+  if [[ "${INIT_SYS}" == "systemd" ]]; then
+    systemctl stop "${SVC_NAME}" >/dev/null 2>&1 || true
+    systemctl disable "${SVC_NAME}" >/dev/null 2>&1 || true
+  elif [[ "${INIT_SYS}" == "openrc" ]]; then
+    rc-service "${SVC_NAME}" stop >/dev/null 2>&1 || true
+    rc-update del "${SVC_NAME}" default >/dev/null 2>&1 || true
+  fi
+  pkill -x microsocks >/dev/null 2>&1 || true
+  return 0
+}
+
+# ========================================
+#  编译安装 microsocks
+# ========================================
+
+install_build_deps() {
+  msg "安装编译依赖..."
   case "${PKG_MGR}" in
     apt)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y
-
-      local ok=0
-      for pkg in dante-server dante; do
-        if apt-get install -y "$pkg" iproute2 curl passwd 2>/dev/null; then
-          PKG_NAME="$pkg"
-          ok=1
-          break
-        fi
-      done
-
-      if [[ "${ok}" -ne 1 ]]; then
-        err "源中未找到 dante-server 或 dante，请检查软件源"
-        return 1
-      fi
+      apt-get install -y gcc make curl >/dev/null 2>&1
       ;;
     yum)
-      yum install -y epel-release >/dev/null 2>&1 || true
-      yum install -y dante-server iproute curl passwd 2>/dev/null \
-        || yum install -y dante iproute curl passwd
+      yum install -y gcc make curl >/dev/null 2>&1
       ;;
     dnf)
-      dnf install -y epel-release >/dev/null 2>&1 || true
-      dnf install -y dante-server iproute curl shadow-utils 2>/dev/null \
-        || dnf install -y dante iproute curl shadow-utils
+      dnf install -y gcc make curl >/dev/null 2>&1
       ;;
     apk)
-      apk update
-      apk add dante-server iproute2 curl shadow
+      apk update >/dev/null 2>&1
+      apk add build-base curl >/dev/null 2>&1
       ;;
     pacman)
-      pacman -Sy --noconfirm dante iproute2 curl
-      PKG_NAME="dante"
+      pacman -Sy --noconfirm gcc make curl >/dev/null 2>&1
       ;;
     zypper)
-      zypper --non-interactive refresh
-      zypper --non-interactive install dante-server iproute2 curl shadow 2>/dev/null \
-        || zypper --non-interactive install dante iproute2 curl shadow
-      ;;
-    *)
-      err "不支持的包管理器: ${PKG_MGR}"
-      return 1
+      zypper --non-interactive install gcc make curl >/dev/null 2>&1
       ;;
   esac
   return 0
 }
 
-ensure_socks_user() {
-  local username="$1"
-  local password="$2"
+build_microsocks() {
+  local tmpdir="/tmp/microsocks-build"
 
-  if id "${username}" >/dev/null 2>&1; then
-    echo "${username}:${password}" | chpasswd
-  else
-    useradd -M -s /usr/sbin/nologin "${username}" 2>/dev/null \
-      || useradd -M -s /sbin/nologin "${username}" 2>/dev/null \
-      || useradd -M -s /bin/false "${username}"
-    echo "${username}:${password}" | chpasswd
+  rm -rf "${tmpdir}"
+  mkdir -p "${tmpdir}"
+
+  msg "下载 microsocks 源码..."
+  if ! curl -sL "${MICROSOCKS_REPO}" -o "${tmpdir}/microsocks.tar.gz"; then
+    err "下载失败"
+    return 1
   fi
+
+  msg "解压..."
+  tar xzf "${tmpdir}/microsocks.tar.gz" -C "${tmpdir}" || { err "解压失败"; return 1; }
+
+  local srcdir="${tmpdir}/microsocks-master"
+  if [[ ! -d "${srcdir}" ]]; then
+    # tar 解出来的目录名不确定时尝试查找
+    srcdir="$(find "${tmpdir}" -maxdepth 1 -type d -name 'microsocks*' | head -1)"
+    [[ -d "${srcdir}" ]] || { err "找不到源码目录"; return 1; }
+  fi
+
+  msg "编译..."
+  cd "${srcdir}"
+  make -j"$(nproc 2>/dev/null || echo 1)" || { err "编译失败"; return 1; }
+
+  if [[ ! -f "${srcdir}/microsocks" ]]; then
+    err "编译产物不存在"
+    return 1
+  fi
+
+  cp -f "${srcdir}/microsocks" "${MICROSOCKS_BIN}"
+  chmod +x "${MICROSOCKS_BIN}"
+
+  rm -rf "${tmpdir}"
+  msg "microsocks 已安装到 ${MICROSOCKS_BIN}"
   return 0
 }
 
-write_config() {
-  local port="$1"
-  local ext_if="$2"
+install_microsocks() {
+  if [[ -x "${MICROSOCKS_BIN}" ]]; then
+    msg "microsocks 已存在，跳过编译"
+    return 0
+  fi
 
-  mkdir -p "$(dirname "${CONF_FILE}")"
-
-  cat > "${CONF_FILE}" <<EOF
-logoutput: syslog
-
-internal: 0.0.0.0 port = ${port}
-external: ${ext_if}
-
-user.privileged: root
-user.unprivileged: nobody
-user.libwrap: nobody
-
-socksmethod: username
-
-client pass {
-  from: 0.0.0.0/0 to: 0.0.0.0/0
-  log: error connect disconnect
-}
-
-socks pass {
-  from: 0.0.0.0/0 to: 0.0.0.0/0
-  command: connect bind udpassociate
-  log: error connect disconnect
-  socksmethod: username
-}
-EOF
-
-  chmod 600 "${CONF_FILE}"
+  install_build_deps
+  build_microsocks || return 1
   return 0
 }
+
+# ========================================
+#  校验
+# ========================================
 
 validate_port() {
   local port="$1"
@@ -419,30 +397,9 @@ validate_username() {
   return 0
 }
 
-install_dante() {
-  if command_exists "${SOCKD_BIN}"; then
-    return 0
-  fi
-
-  msg "开始安装 Dante..."
-  install_packages || return 1
-
-  if ! command_exists "${SOCKD_BIN}"; then
-    for bin in /usr/sbin/danted /usr/sbin/sockd /usr/bin/sockd; do
-      if [[ -x "${bin}" ]]; then
-        SOCKD_BIN="${bin}"
-        break
-      fi
-    done
-  fi
-
-  if ! command_exists "${SOCKD_BIN}" && [[ ! -x "${SOCKD_BIN}" ]]; then
-    err "安装完成但未找到 sockd/danted 可执行文件"
-    return 1
-  fi
-
-  return 0
-}
+# ========================================
+#  展示代理信息
+# ========================================
 
 show_proxy_info() {
   local ipaddr=""
@@ -465,73 +422,60 @@ show_proxy_info() {
 # ========================================
 
 do_install() {
-  local port user pass ext_if
-  local use_random
+  local port user pass use_random
 
   banner
   echo -e "  ${BOLD}安装 SOCKS5${RESET}"
   echo ""
 
-  # ── 先安装，再问配置 ──────────────────────
-  ext_if="$(get_default_if)"
-  if [[ -z "${ext_if}" ]]; then
-    err "无法检测默认网卡"
-    pause
-    return 0
-  fi
-
-  msg "系统: ${OS_ID} | 包管理器: ${PKG_MGR} | init: ${INIT_SYS} | 网卡: ${ext_if}"
+  msg "系统: ${OS_ID} | 包管理器: ${PKG_MGR} | init: ${INIT_SYS}"
   echo ""
 
-  install_dante || { err "安装 Dante 失败"; pause; return 0; }
+  # ── 编译安装 microsocks ──────────────────
+  install_microsocks || { err "安装 microsocks 失败"; pause; return 0; }
 
-  # ── 询问配置方式 ──────────────────────────
+  # ── 选择配置方式 ─────────────────────────
   echo ""
   echo -e "  ${BOLD}配置代理参数${RESET}"
   echo ""
-  echo -e "  y) 全部随机生成"
+  echo -e "  y) 全部随机生成 (端口/用户名/密码)"
   echo -e "  n) 手动输入"
   echo ""
   read -rp "  是否随机生成配置? [Y/n]: " use_random
   use_random="${use_random:-y}"
-
   echo ""
 
-  if [[ "${use_random,,}" == "y" || "${use_random,,}" == "yes" || "${use_random}" == "" ]]; then
-    port="$(gen_port)"
-    user="$(gen_user)"
-    pass="$(gen_pass)"
-    echo -e "  ${DIM}已随机生成配置${RESET}"
-  else
+  if [[ "${use_random,,}" == "n" || "${use_random,,}" == "no" ]]; then
     while true; do
       read -rp "  端口: " port
       validate_port "${port}" && break
-      err "端口无效，请输入 1-65535 之间的数字"
+      err "端口无效，请输入 1-65535"
     done
-
     while true; do
       read -rp "  用户名: " user
       validate_username "${user}" && break
       err "用户名无效，仅允许字母、数字、点、下划线、横线"
     done
-
     while true; do
       read -rp "  密码: " pass
       [[ -n "${pass}" ]] && break
       err "密码不能为空"
     done
+  else
+    port="$(gen_port)"
+    user="$(gen_user)"
+    pass="$(gen_pass)"
+    echo -e "  ${DIM}已随机生成配置${RESET}"
   fi
 
-  # ── 写配置 启动服务 ───────────────────────
-  ensure_socks_user "${user}" "${pass}"
-  write_config "${port}" "${ext_if}"
-  svc_enable
-  svc_start
-  open_firewall_port "${port}"
-
+  # ── 写服务 启动 ──────────────────────────
   SOCKS_PORT="${port}"
   SOCKS_USER="${user}"
   SOCKS_PASS="${pass}"
+
+  write_service "${port}" "${user}" "${pass}"
+  svc_enable_start
+  open_firewall_port "${port}"
   save_cred
 
   banner
@@ -546,11 +490,9 @@ do_status() {
   echo -e "  ${BOLD}服务状态${RESET}"
   echo ""
   echo -e "  系统:     ${CYAN}${OS_ID}${RESET}"
-  echo -e "  家族:     ${CYAN}${OS_FAMILY}${RESET}"
   echo -e "  包管理器: ${CYAN}${PKG_MGR}${RESET}"
   echo -e "  init:     ${CYAN}${INIT_SYS}${RESET}"
-  echo -e "  服务名:   ${CYAN}${SVC_NAME}${RESET}"
-  echo -e "  配置文件: ${CYAN}${CONF_FILE}${RESET}"
+  echo -e "  二进制:   ${CYAN}${MICROSOCKS_BIN}${RESET}"
   echo ""
 
   if svc_is_active 2>/dev/null; then
@@ -590,8 +532,7 @@ do_view() {
 }
 
 do_edit() {
-  local port user pass ext_if old_port
-  local use_random
+  local port user pass old_port use_random
 
   if ! load_cred 2>/dev/null; then
     warn "未找到已有配置，请先安装"
@@ -600,60 +541,53 @@ do_edit() {
   fi
 
   old_port="${SOCKS_PORT}"
-  ext_if="$(get_default_if)"
 
   banner
   echo -e "  ${BOLD}编辑代理${RESET}"
   echo ""
-  echo -e "  当前配置:"
-  echo -e "  端口: ${CYAN}${SOCKS_PORT}${RESET}  用户: ${CYAN}${SOCKS_USER}${RESET}  密码: ${CYAN}${SOCKS_PASS}${RESET}"
+  echo -e "  当前: 端口=${CYAN}${SOCKS_PORT}${RESET}  用户=${CYAN}${SOCKS_USER}${RESET}  密码=${CYAN}${SOCKS_PASS}${RESET}"
   echo ""
   echo -e "  y) 全部重新随机生成"
   echo -e "  n) 手动修改"
   echo ""
   read -rp "  是否随机生成新配置? [Y/n]: " use_random
   use_random="${use_random:-y}"
-
   echo ""
 
-  if [[ "${use_random,,}" == "y" || "${use_random,,}" == "yes" || "${use_random}" == "" ]]; then
-    port="$(gen_port)"
-    user="$(gen_user)"
-    pass="$(gen_pass)"
-    echo -e "  ${DIM}已随机生成新配置${RESET}"
-  else
+  if [[ "${use_random,,}" == "n" || "${use_random,,}" == "no" ]]; then
     while true; do
       read -rp "  端口 (当前 ${SOCKS_PORT}): " port
       port="${port:-${SOCKS_PORT}}"
       validate_port "${port}" && break
       err "端口无效"
     done
-
     while true; do
       read -rp "  用户名 (当前 ${SOCKS_USER}): " user
       user="${user:-${SOCKS_USER}}"
       validate_username "${user}" && break
       err "用户名无效"
     done
-
-    read -rp "  密码 (直接回车保持不变): " pass
+    read -rp "  密码 (回车保持不变): " pass
     pass="${pass:-${SOCKS_PASS}}"
-  fi
-
-  ensure_socks_user "${user}" "${pass}"
-  write_config "${port}" "${ext_if}"
-  svc_enable
-  svc_start
-
-  if [[ "${old_port}" != "${port}" ]]; then
-    close_firewall_port "${old_port}"
-    open_firewall_port "${port}"
+  else
+    port="$(gen_port)"
+    user="$(gen_user)"
+    pass="$(gen_pass)"
+    echo -e "  ${DIM}已随机生成新配置${RESET}"
   fi
 
   SOCKS_PORT="${port}"
   SOCKS_USER="${user}"
   SOCKS_PASS="${pass}"
+
+  write_service "${port}" "${user}" "${pass}"
+  svc_enable_start
   save_cred
+
+  if [[ "${old_port}" != "${port}" ]]; then
+    close_firewall_port "${old_port}"
+    open_firewall_port "${port}"
+  fi
 
   banner
   msg "修改完成"
@@ -662,36 +596,8 @@ do_edit() {
   return 0
 }
 
-remove_package() {
-  case "${PKG_MGR}" in
-    apt)
-      apt-get remove -y "${PKG_NAME}" >/dev/null 2>&1 || true
-      apt-get purge -y "${PKG_NAME}" >/dev/null 2>&1 || true
-      apt-get autoremove -y >/dev/null 2>&1 || true
-      ;;
-    yum)
-      yum remove -y "${PKG_NAME}" >/dev/null 2>&1 \
-        || yum remove -y dante >/dev/null 2>&1 || true
-      ;;
-    dnf)
-      dnf remove -y "${PKG_NAME}" >/dev/null 2>&1 \
-        || dnf remove -y dante >/dev/null 2>&1 || true
-      ;;
-    apk)
-      apk del "${PKG_NAME}" >/dev/null 2>&1 || true
-      ;;
-    pacman)
-      pacman -Rns --noconfirm "${PKG_NAME}" >/dev/null 2>&1 || true
-      ;;
-    zypper)
-      zypper --non-interactive remove "${PKG_NAME}" >/dev/null 2>&1 || true
-      ;;
-  esac
-  return 0
-}
-
 do_uninstall() {
-  local ans old_port old_user
+  local ans old_port
 
   banner
   echo -e "  ${BOLD}卸载 SOCKS5${RESET}"
@@ -700,24 +606,21 @@ do_uninstall() {
   [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]] || return 0
 
   old_port=""
-  old_user=""
+  load_cred 2>/dev/null && old_port="${SOCKS_PORT:-}" || true
 
-  if load_cred 2>/dev/null; then
-    old_port="${SOCKS_PORT:-}"
-    old_user="${SOCKS_USER:-}"
-  fi
+  svc_stop_disable
 
-  svc_stop
   [[ -n "${old_port}" ]] && close_firewall_port "${old_port}"
 
-  rm -f "${CONF_FILE}"
+  rm -f "${MICROSOCKS_BIN}"
+  rm -f "${SVC_FILE_SYSTEMD}"
+  rm -f "${SVC_FILE_OPENRC}"
   rm -f "${CRED_FILE}"
+  rm -f "${SCRIPT_PATH}"
 
-  if [[ -n "${old_user}" ]] && id "${old_user}" >/dev/null 2>&1; then
-    userdel "${old_user}" >/dev/null 2>&1 || true
+  if [[ "${INIT_SYS}" == "systemd" ]]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
   fi
-
-  remove_package
 
   banner
   msg "卸载完成"
@@ -727,8 +630,12 @@ do_uninstall() {
 
 install_self_cmd() {
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-    cp -f "${BASH_SOURCE[0]}" "${SCRIPT_PATH}" 2>/dev/null || true
-    chmod +x "${SCRIPT_PATH}" 2>/dev/null || true
+    local src
+    src="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+    if [[ "${src}" != "${SCRIPT_PATH}" ]]; then
+      cp -f "${src}" "${SCRIPT_PATH}" 2>/dev/null || true
+      chmod +x "${SCRIPT_PATH}" 2>/dev/null || true
+    fi
   fi
   return 0
 }
@@ -743,7 +650,7 @@ main_menu() {
 
     if svc_is_active 2>/dev/null; then
       local info=""
-      load_cred 2>/dev/null && info="  端口: ${GREEN}${SOCKS_PORT}${RESET}" || true
+      load_cred 2>/dev/null && info="  端口=${GREEN}${SOCKS_PORT}${RESET}" || true
       echo -e "  状态: ${GREEN}● 运行中${RESET}${info}"
     else
       echo -e "  状态: ${RED}✗ 未运行${RESET}"
