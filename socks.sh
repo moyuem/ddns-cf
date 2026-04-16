@@ -1,693 +1,690 @@
 #!/usr/bin/env bash
-set -eo pipefail
+#
+# SOCKS5 代理一键管理脚本
+# 支持：安装 / 卸载 / 启停 / 更新 / 配置修改
+# 后端：Xray-core
+#
 
-# ========================================
-#  颜色
-# ========================================
+set -euo pipefail
+
+# ======================== 全局变量 ========================
+SCRIPT_URL="https://raw.githubusercontent.com/moyuem/ddns-cf/main/socks.sh"
+SCRIPT_PATH="/usr/local/bin/socks"
+INSTALL_DIR="/usr/local/etc/xray"
+CONFIG_FILE="${INSTALL_DIR}/config.json"
+XRAY_BIN="/usr/local/bin/xray"
+SERVICE_NAME="xray-socks"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+LOG_DIR="/var/log/${SERVICE_NAME}"
+DATA_FILE="${INSTALL_DIR}/.user_data"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
+YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-DIM='\033[2m'
-RESET='\033[0m'
+NC='\033[0m'
 
-# ========================================
-#  全局变量
-# ========================================
-
-MICROSOCKS_REPO="https://github.com/rofl0r/microsocks/archive/refs/heads/master.tar.gz"
-MICROSOCKS_BIN="/usr/local/bin/microsocks"
-
-SVC_NAME="microsocks"
-SVC_FILE_SYSTEMD="/etc/systemd/system/microsocks.service"
-SVC_FILE_OPENRC="/etc/init.d/microsocks"
-
-CRED_FILE="/root/.socks5_info"
-SCRIPT_PATH="/usr/local/bin/socks"
-
-OS_ID="unknown"
-OS_FAMILY=""
-PKG_MGR=""
-INIT_SYS="unknown"
-
-SOCKS_PORT=""
-SOCKS_USER=""
-SOCKS_PASS=""
-
-# ========================================
-#  基础函数
-# ========================================
-
-msg()  { echo -e "${GREEN}[OK]${RESET} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${RESET} $*"; }
-err()  { echo -e "${RED}[ERR]${RESET} $*" >&2; }
-
-pause() {
-  echo ""
-  read -rp "  按回车继续..." _ || true
-}
-
-banner() {
-  command -v clear >/dev/null 2>&1 && clear 2>/dev/null || true
-  echo -e "${BOLD}${CYAN}  SOCKS5 管理面板${RESET} ${DIM}(microsocks | ${OS_ID})${RESET}"
-  echo "  ----------------------------------------"
-  echo ""
-}
+# ======================== 工具函数 ========================
+msg()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+err()  { echo -e "${RED}[ERROR]${NC} $*"; }
 
 check_root() {
-  if [[ ${EUID:-1} -ne 0 ]]; then
-    err "请使用 root 运行"
+  if [[ ${EUID} -ne 0 ]]; then
+    err "请使用 root 用户运行此脚本"
     exit 1
   fi
-  return 0
 }
 
-command_exists() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-detect_os() {
-  OS_ID="unknown"
-
-  if [[ -r /etc/os-release ]]; then
-    . /etc/os-release 2>/dev/null || true
-    OS_ID="${ID:-unknown}"
-    OS_ID="${OS_ID,,}"
-  elif [[ -f /etc/redhat-release ]]; then
-    OS_ID="centos"
+check_os() {
+  if [[ ! -f /etc/os-release ]]; then
+    err "不支持的操作系统"
+    exit 1
   fi
-
-  case "${OS_ID}" in
-    debian|ubuntu|linuxmint|pop|kali|deepin|raspbian)
-      OS_FAMILY="debian"; PKG_MGR="apt" ;;
-    centos|rhel|almalinux|rocky|ol|amzn|scientific)
-      OS_FAMILY="rhel"; PKG_MGR="yum"
-      command_exists dnf && PKG_MGR="dnf" ;;
-    fedora)
-      OS_FAMILY="fedora"; PKG_MGR="dnf" ;;
-    alpine)
-      OS_FAMILY="alpine"; PKG_MGR="apk" ;;
-    arch|manjaro|endeavouros|garuda)
-      OS_FAMILY="arch"; PKG_MGR="pacman" ;;
-    opensuse*|sles|suse)
-      OS_FAMILY="suse"; PKG_MGR="zypper" ;;
-    *)
-      if command_exists apt-get; then     OS_FAMILY="debian";  PKG_MGR="apt"
-      elif command_exists dnf; then       OS_FAMILY="rhel";    PKG_MGR="dnf"
-      elif command_exists yum; then       OS_FAMILY="rhel";    PKG_MGR="yum"
-      elif command_exists apk; then       OS_FAMILY="alpine";  PKG_MGR="apk"
-      elif command_exists pacman; then    OS_FAMILY="arch";    PKG_MGR="pacman"
-      elif command_exists zypper; then    OS_FAMILY="suse";    PKG_MGR="zypper"
-      else err "无法识别系统"; exit 1; fi
-      ;;
-  esac
-
-  if command_exists systemctl && [[ -d /run/systemd/system ]]; then
-    INIT_SYS="systemd"
-  elif command_exists rc-service; then
-    INIT_SYS="openrc"
-  else
-    INIT_SYS="unknown"
-  fi
-
-  return 0
+  . /etc/os-release
+  OS_ID="${ID,,}"
 }
 
-# ========================================
-#  凭据 读/写
-# ========================================
-
-save_cred() {
-  cat > "${CRED_FILE}" <<EOF
-SOCKS_PORT='${SOCKS_PORT}'
-SOCKS_USER='${SOCKS_USER}'
-SOCKS_PASS='${SOCKS_PASS}'
-EOF
-  chmod 600 "${CRED_FILE}"
-  return 0
+press_any_key() {
+  echo ""
+  read -rp "按回车键返回菜单..." _
 }
 
-load_cred() {
-  if [[ -f "${CRED_FILE}" ]]; then
-    . "${CRED_FILE}"
-    return 0
-  fi
-  return 1
-}
-
-# ========================================
-#  网络工具
-# ========================================
-
-get_local_ip() {
-  local ip=""
-  ip="$(ip route get 8.8.8.8 2>/dev/null \
-    | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  [[ -z "${ip}" ]] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  echo "${ip}"
-}
-
+# ======================== 网络工具 ========================
 get_public_ip() {
   local ip=""
+  # 强制 IPv4
   ip="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || true)"
   [[ -z "${ip}" ]] && ip="$(curl -4 -s --max-time 5 ip.sb 2>/dev/null || true)"
   [[ -z "${ip}" ]] && ip="$(curl -4 -s --max-time 5 api.ipify.org 2>/dev/null || true)"
+  [[ -z "${ip}" ]] && ip="$(curl -4 -s --max-time 5 ipv4.icanhazip.com 2>/dev/null || true)"
   echo "${ip}"
 }
 
-open_firewall_port() {
-  local port="$1"
-  if command_exists ufw; then
-    ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+get_arch() {
+  local arch
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64)     echo "64" ;;
+    aarch64|arm64)     echo "arm64-v8a" ;;
+    armv7l|armhf)      echo "arm32-v7a" ;;
+    *)                 echo "" ;;
+  esac
+}
+
+random_string() {
+  local len="${1:-16}"
+  tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${len}"
+}
+
+random_port() {
+  local port
+  while true; do
+    port=$(( RANDOM % 40000 + 20000 ))
+    if ! ss -tlnp | grep -q ":${port} "; then
+      echo "${port}"
+      return
+    fi
+  done
+}
+
+# ======================== 快捷命令安装 ========================
+install_self_cmd() {
+  local src=""
+  if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    src="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
   fi
-  if command_exists firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
+  # 已经是从快捷命令运行
+  [[ "${src}" == "${SCRIPT_PATH}" ]] && return 0
+
+  # 本地文件可用 → 直接复制
+  if [[ -n "${src}" && -f "${src}" ]]; then
+    cp -f "${src}" "${SCRIPT_PATH}" 2>/dev/null || true
+    chmod +x "${SCRIPT_PATH}" 2>/dev/null || true
+    return 0
+  fi
+
+  # 通过 bash <(curl ...) 运行，从远程下载
+  if curl -sL --max-time 15 "${SCRIPT_URL}" -o "${SCRIPT_PATH}" 2>/dev/null; then
+    chmod +x "${SCRIPT_PATH}"
+    msg "已安装快捷命令: socks"
+  else
+    warn "快捷命令安装失败，可手动运行脚本"
   fi
   return 0
 }
 
-close_firewall_port() {
-  local port="$1"
-  if command_exists ufw; then
-    ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+# ======================== 依赖安装 ========================
+install_deps() {
+  msg "安装基础依赖..."
+  case "${OS_ID}" in
+    ubuntu|debian)
+      apt-get update -qq
+      apt-get install -y -qq curl wget unzip jq >/dev/null 2>&1
+      ;;
+    centos|rhel|rocky|alma|fedora)
+      yum install -y -q curl wget unzip jq >/dev/null 2>&1
+      ;;
+    *)
+      warn "未知发行版，请确保已安装 curl wget unzip jq"
+      ;;
+  esac
+}
+
+# ======================== Xray 安装 ========================
+install_xray() {
+  if [[ -f "${XRAY_BIN}" ]]; then
+    msg "Xray 已存在，跳过下载"
+    return 0
   fi
-  if command_exists firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
+
+  local arch
+  arch="$(get_arch)"
+  if [[ -z "${arch}" ]]; then
+    err "不支持的系统架构: $(uname -m)"
+    return 1
   fi
-  return 0
+
+  msg "获取 Xray 最新版本..."
+  local latest_ver
+  latest_ver=$(curl -sL --max-time 10 \
+    "https://api.github.com/repos/XTLS/Xray-core/releases/latest" \
+    | jq -r '.tag_name' 2>/dev/null || true)
+
+  if [[ -z "${latest_ver}" || "${latest_ver}" == "null" ]]; then
+    err "获取 Xray 版本失败"
+    return 1
+  fi
+
+  msg "下载 Xray ${latest_ver} (${arch})..."
+  local dl_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${arch}.zip"
+  local tmp_zip="/tmp/xray_$$.zip"
+  local tmp_dir="/tmp/xray_$$"
+
+  if ! curl -sL --max-time 120 "${dl_url}" -o "${tmp_zip}"; then
+    err "下载 Xray 失败"
+    return 1
+  fi
+
+  mkdir -p "${tmp_dir}"
+  unzip -qo "${tmp_zip}" -d "${tmp_dir}"
+  cp -f "${tmp_dir}/xray" "${XRAY_BIN}"
+  chmod +x "${XRAY_BIN}"
+
+  rm -rf "${tmp_zip}" "${tmp_dir}"
+  msg "Xray ${latest_ver} 安装完成"
 }
 
-# ========================================
-#  随机生成
-# ========================================
-
-gen_port() {
-  shuf -i 10000-59999 -n 1 2>/dev/null || echo $(( RANDOM % 49999 + 10000 ))
-}
-
-gen_user() {
-  local s
-  s="$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || true)"
-  [[ -n "${s}" ]] || s="$RANDOM"
-  echo "user${s}"
-}
-
-gen_pass() {
-  local p
-  p="$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || true)"
-  [[ -n "${p}" ]] || p="Pass$(date +%s)$RANDOM"
-  echo "${p}"
-}
-
-# ========================================
-#  服务管理
-# ========================================
-
-write_systemd_unit() {
+# ======================== 配置生成 ========================
+generate_config() {
   local port="$1" user="$2" pass="$3"
 
-  cat > "${SVC_FILE_SYSTEMD}" <<EOF
+  mkdir -p "${INSTALL_DIR}" "${LOG_DIR}"
+
+  cat > "${CONFIG_FILE}" <<EOF
+{
+  "log": {
+    "access": "${LOG_DIR}/access.log",
+    "error": "${LOG_DIR}/error.log",
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "port": ${port},
+      "listen": "0.0.0.0",
+      "protocol": "socks",
+      "settings": {
+        "auth": "password",
+        "accounts": [
+          {
+            "user": "${user}",
+            "pass": "${pass}"
+          }
+        ],
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
+    }
+  ]
+}
+EOF
+
+  # 保存用户数据（供后续读取）
+  cat > "${DATA_FILE}" <<EOF
+PORT=${port}
+USER=${user}
+PASS=${pass}
+EOF
+
+  msg "配置文件已生成: ${CONFIG_FILE}"
+}
+
+# ======================== systemd 服务 ========================
+create_service() {
+  cat > "${SERVICE_FILE}" <<EOF
 [Unit]
-Description=MicroSocks SOCKS5 Proxy
-After=network.target
+Description=Xray SOCKS5 Proxy Service
+Documentation=https://xtls.github.io
+After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-ExecStart=${MICROSOCKS_BIN} -p ${port} -u ${user} -P ${pass}
-Restart=always
-RestartSec=3
+ExecStart=${XRAY_BIN} run -config ${CONFIG_FILE}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  return 0
+  systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1
+  msg "systemd 服务已创建"
 }
 
-write_openrc_init() {
-  local port="$1" user="$2" pass="$3"
-
-  cat > "${SVC_FILE_OPENRC}" <<'HEAD'
-#!/sbin/openrc-run
-
-description="MicroSocks SOCKS5 Proxy"
-command="/usr/local/bin/microsocks"
-HEAD
-
-  cat >> "${SVC_FILE_OPENRC}" <<EOF
-command_args="-p ${port} -u ${user} -P ${pass}"
-command_background=true
-pidfile="/run/microsocks.pid"
-
-depend() {
-  need net
-}
-EOF
-
-  chmod +x "${SVC_FILE_OPENRC}"
-  return 0
-}
-
-write_service() {
-  local port="$1" user="$2" pass="$3"
-
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    write_systemd_unit "${port}" "${user}" "${pass}"
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    write_openrc_init "${port}" "${user}" "${pass}"
-  fi
-  return 0
-}
-
-svc_is_active() {
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl is-active --quiet "${SVC_NAME}" 2>/dev/null
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    rc-service "${SVC_NAME}" status >/dev/null 2>&1
-  else
-    pgrep -x microsocks >/dev/null 2>&1
-  fi
-}
-
-svc_enable_start() {
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl enable "${SVC_NAME}" >/dev/null 2>&1 || true
-    systemctl restart "${SVC_NAME}"
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    rc-update add "${SVC_NAME}" default >/dev/null 2>&1 || true
-    rc-service "${SVC_NAME}" restart 2>/dev/null || rc-service "${SVC_NAME}" start
-  else
-    pkill -x microsocks >/dev/null 2>&1 || true
-    sleep 0.3
-    nohup "${MICROSOCKS_BIN}" -p "${SOCKS_PORT}" -u "${SOCKS_USER}" -P "${SOCKS_PASS}" \
-      >/dev/null 2>&1 &
-    msg "已后台启动 (PID $!)"
-  fi
-  return 0
-}
-
-svc_stop_disable() {
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl stop "${SVC_NAME}" >/dev/null 2>&1 || true
-    systemctl disable "${SVC_NAME}" >/dev/null 2>&1 || true
-  elif [[ "${INIT_SYS}" == "openrc" ]]; then
-    rc-service "${SVC_NAME}" stop >/dev/null 2>&1 || true
-    rc-update del "${SVC_NAME}" default >/dev/null 2>&1 || true
-  fi
-  pkill -x microsocks >/dev/null 2>&1 || true
-  return 0
-}
-
-# ========================================
-#  编译安装 microsocks
-# ========================================
-
-install_build_deps() {
-  msg "安装编译依赖..."
-  case "${PKG_MGR}" in
-    apt)
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y gcc make curl >/dev/null 2>&1
-      ;;
-    yum)
-      yum install -y gcc make curl >/dev/null 2>&1
-      ;;
-    dnf)
-      dnf install -y gcc make curl >/dev/null 2>&1
-      ;;
-    apk)
-      apk update >/dev/null 2>&1
-      apk add build-base curl >/dev/null 2>&1
-      ;;
-    pacman)
-      pacman -Sy --noconfirm gcc make curl >/dev/null 2>&1
-      ;;
-    zypper)
-      zypper --non-interactive install gcc make curl >/dev/null 2>&1
-      ;;
-  esac
-  return 0
-}
-
-build_microsocks() {
-  local tmpdir="/tmp/microsocks-build"
-
-  rm -rf "${tmpdir}"
-  mkdir -p "${tmpdir}"
-
-  msg "下载 microsocks 源码..."
-  if ! curl -sL "${MICROSOCKS_REPO}" -o "${tmpdir}/microsocks.tar.gz"; then
-    err "下载失败"
-    return 1
-  fi
-
-  msg "解压..."
-  tar xzf "${tmpdir}/microsocks.tar.gz" -C "${tmpdir}" || { err "解压失败"; return 1; }
-
-  local srcdir="${tmpdir}/microsocks-master"
-  if [[ ! -d "${srcdir}" ]]; then
-    srcdir="$(find "${tmpdir}" -maxdepth 1 -type d -name 'microsocks*' | head -1)"
-    [[ -d "${srcdir}" ]] || { err "找不到源码目录"; return 1; }
-  fi
-
-  msg "编译..."
-  cd "${srcdir}"
-  make -j"$(nproc 2>/dev/null || echo 1)" || { err "编译失败"; return 1; }
-
-  if [[ ! -f "${srcdir}/microsocks" ]]; then
-    err "编译产物不存在"
-    return 1
-  fi
-
-  cp -f "${srcdir}/microsocks" "${MICROSOCKS_BIN}"
-  chmod +x "${MICROSOCKS_BIN}"
-
-  rm -rf "${tmpdir}"
-  msg "microsocks 已安装到 ${MICROSOCKS_BIN}"
-  return 0
-}
-
-install_microsocks() {
-  if [[ -x "${MICROSOCKS_BIN}" ]]; then
-    msg "microsocks 已存在，跳过编译"
-    return 0
-  fi
-
-  install_build_deps
-  build_microsocks || return 1
-  return 0
-}
-
-# ========================================
-#  校验
-# ========================================
-
-validate_port() {
+# ======================== 防火墙 ========================
+open_firewall() {
   local port="$1"
-  [[ "${port}" =~ ^[0-9]+$ ]] || return 1
-  (( port >= 1 && port <= 65535 )) || return 1
-  return 0
-}
 
-validate_username() {
-  local user="$1"
-  [[ -n "${user}" ]] || return 1
-  [[ "${user}" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
-  return 0
-}
-
-# ========================================
-#  展示代理信息
-# ========================================
-
-show_proxy_info() {
-  local pub_ip local_ip display_ip
-
-  pub_ip="$(get_public_ip)"
-  local_ip="$(get_local_ip)"
-  display_ip="${pub_ip:-${local_ip:-unknown}}"
-
-  echo ""
-  echo -e "  ┌──────────────────────────────────"
-  echo -e "  │  地址：${CYAN}${display_ip}${RESET}"
-  echo -e "  │  端口：${CYAN}${SOCKS_PORT}${RESET}"
-  echo -e "  │  用户：${CYAN}${SOCKS_USER}${RESET}"
-  echo -e "  │  密码：${CYAN}${SOCKS_PASS}${RESET}"
-  echo -e "  │"
-  echo -e "  │  URL：${GREEN}socks5://${SOCKS_USER}:${SOCKS_PASS}@${display_ip}:${SOCKS_PORT}${RESET}"
-  echo -e "  └──────────────────────────────────"
-  echo ""
-}
-
-# ========================================
-#  业务逻辑
-# ========================================
-
-do_install() {
-  local port user pass use_random
-
-  banner
-  echo -e "  ${BOLD}安装 SOCKS5${RESET}"
-  echo ""
-
-  msg "系统: ${OS_ID} | 包管理器: ${PKG_MGR} | init: ${INIT_SYS}"
-  echo ""
-
-  install_microsocks || { err "安装 microsocks 失败"; pause; return 0; }
-
-  echo ""
-  echo -e "  ${BOLD}配置代理参数${RESET}"
-  echo ""
-  echo -e "  y) 全部随机生成 (端口/用户名/密码)"
-  echo -e "  n) 手动输入"
-  echo ""
-  read -rp "  是否随机生成配置? [Y/n]: " use_random
-  use_random="${use_random:-y}"
-  echo ""
-
-  if [[ "${use_random,,}" == "n" || "${use_random,,}" == "no" ]]; then
-    while true; do
-      read -rp "  端口: " port
-      validate_port "${port}" && break
-      err "端口无效，请输入 1-65535"
-    done
-    while true; do
-      read -rp "  用户名: " user
-      validate_username "${user}" && break
-      err "用户名无效，仅允许字母、数字、点、下划线、横线"
-    done
-    while true; do
-      read -rp "  密码: " pass
-      [[ -n "${pass}" ]] && break
-      err "密码不能为空"
-    done
-  else
-    port="$(gen_port)"
-    user="$(gen_user)"
-    pass="$(gen_pass)"
-    echo -e "  ${DIM}已随机生成配置${RESET}"
+  # ufw
+  if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+    ufw allow "${port}/tcp" >/dev/null 2>&1
+    ufw allow "${port}/udp" >/dev/null 2>&1
+    msg "ufw 已放行端口 ${port}"
   fi
 
-  SOCKS_PORT="${port}"
-  SOCKS_USER="${user}"
-  SOCKS_PASS="${pass}"
+  # firewalld
+  if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1
+    firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1
+    firewall-cmd --reload >/dev/null 2>&1
+    msg "firewalld 已放行端口 ${port}"
+  fi
 
-  write_service "${port}" "${user}" "${pass}"
-  svc_enable_start
-  open_firewall_port "${port}"
-  save_cred
-
-  banner
-  msg "安装完成"
-  show_proxy_info
-  pause
-  return 0
+  # iptables（兜底）
+  if command -v iptables &>/dev/null; then
+    iptables  -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null \
+      || iptables  -I INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null
+    iptables  -C INPUT -p udp --dport "${port}" -j ACCEPT 2>/dev/null \
+      || iptables  -I INPUT -p udp --dport "${port}" -j ACCEPT 2>/dev/null
+  fi
+  if command -v ip6tables &>/dev/null; then
+    ip6tables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null \
+      || ip6tables -I INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null
+    ip6tables -C INPUT -p udp --dport "${port}" -j ACCEPT 2>/dev/null \
+      || ip6tables -I INPUT -p udp --dport "${port}" -j ACCEPT 2>/dev/null
+  fi
 }
 
-do_status() {
-  banner
-  echo -e "  ${BOLD}服务状态${RESET}"
-  echo ""
-  echo -e "  系统:     ${CYAN}${OS_ID}${RESET}"
-  echo -e "  包管理器: ${CYAN}${PKG_MGR}${RESET}"
-  echo -e "  init:     ${CYAN}${INIT_SYS}${RESET}"
-  echo -e "  二进制:   ${CYAN}${MICROSOCKS_BIN}${RESET}"
-  echo ""
+close_firewall() {
+  local port="$1"
+  [[ -z "${port}" ]] && return 0
 
-  if svc_is_active 2>/dev/null; then
-    echo -e "  状态: ${GREEN}● 运行中${RESET}"
-  else
-    echo -e "  状态: ${RED}✗ 未运行${RESET}"
+  if command -v ufw &>/dev/null; then
+    ufw delete allow "${port}/tcp" 2>/dev/null || true
+    ufw delete allow "${port}/udp" 2>/dev/null || true
   fi
 
-  if load_cred 2>/dev/null; then
-    echo -e "  端口: ${GREEN}${SOCKS_PORT}${RESET}"
-    echo -e "  用户: ${GREEN}${SOCKS_USER}${RESET}"
+  if command -v firewall-cmd &>/dev/null; then
+    firewall-cmd --permanent --remove-port="${port}/tcp" 2>/dev/null || true
+    firewall-cmd --permanent --remove-port="${port}/udp" 2>/dev/null || true
+    firewall-cmd --reload 2>/dev/null || true
   fi
 
-  echo ""
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl --no-pager --full status "${SVC_NAME}" 2>/dev/null | head -15 || true
-  fi
-
-  pause
-  return 0
+  iptables  -D INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
+  iptables  -D INPUT -p udp --dport "${port}" -j ACCEPT 2>/dev/null || true
+  ip6tables -D INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
+  ip6tables -D INPUT -p udp --dport "${port}" -j ACCEPT 2>/dev/null || true
 }
 
-do_view() {
-  banner
-  echo -e "  ${BOLD}代理信息${RESET}"
-
-  if load_cred 2>/dev/null; then
-    show_proxy_info
-  else
-    echo ""
-    warn "未找到已保存的代理信息，请先安装"
-    echo ""
-  fi
-
-  pause
-  return 0
-}
-
-do_edit() {
-  local port user pass old_port use_random
-
-  if ! load_cred 2>/dev/null; then
-    warn "未找到已有配置，请先安装"
-    pause
+# ======================== 读取现有配置 ========================
+load_user_data() {
+  if [[ -f "${DATA_FILE}" ]]; then
+    source "${DATA_FILE}"
+    CURRENT_PORT="${PORT:-}"
+    CURRENT_USER="${USER:-}"
+    CURRENT_PASS="${PASS:-}"
     return 0
   fi
+  CURRENT_PORT=""
+  CURRENT_USER=""
+  CURRENT_PASS=""
+  return 1
+}
 
-  old_port="${SOCKS_PORT}"
+# ======================== 核心功能 ========================
 
-  banner
-  echo -e "  ${BOLD}编辑代理${RESET}"
+# ---- 安装 ----
+install_proxy() {
   echo ""
-  echo -e "  当前: 端口=${CYAN}${SOCKS_PORT}${RESET}  用户=${CYAN}${SOCKS_USER}${RESET}  密码=${CYAN}${SOCKS_PASS}${RESET}"
-  echo ""
-  echo -e "  y) 全部重新随机生成"
-  echo -e "  n) 手动修改"
-  echo ""
-  read -rp "  是否随机生成新配置? [Y/n]: " use_random
-  use_random="${use_random:-y}"
-  echo ""
+  msg "========== 安装 SOCKS5 代理 =========="
 
-  if [[ "${use_random,,}" == "n" || "${use_random,,}" == "no" ]]; then
-    while true; do
-      read -rp "  端口 (当前 ${SOCKS_PORT}): " port
-      port="${port:-${SOCKS_PORT}}"
-      validate_port "${port}" && break
-      err "端口无效"
-    done
-    while true; do
-      read -rp "  用户名 (当前 ${SOCKS_USER}): " user
-      user="${user:-${SOCKS_USER}}"
-      validate_username "${user}" && break
-      err "用户名无效"
-    done
-    read -rp "  密码 (回车保持不变): " pass
-    pass="${pass:-${SOCKS_PASS}}"
+  # 如果已安装，询问是否重装
+  if [[ -f "${XRAY_BIN}" && -f "${CONFIG_FILE}" ]]; then
+    warn "检测到已安装，继续将覆盖现有配置"
+    read -rp "是否继续？[y/N]: " yn
+    [[ "${yn,,}" != "y" ]] && return 0
+  fi
+
+  install_deps
+  install_xray
+
+  echo ""
+  read -rp "设置端口 (留空随机): " input_port
+  local port="${input_port:-$(random_port)}"
+
+  read -rp "设置用户名 (留空随机): " input_user
+  local user="${input_user:-user$(random_string 5)}"
+
+  read -rp "设置密码 (留空随机): " input_pass
+  local pass="${input_pass:-$(random_string 16)}"
+
+  generate_config "${port}" "${user}" "${pass}"
+  create_service
+  open_firewall "${port}"
+
+  systemctl restart "${SERVICE_NAME}"
+  sleep 1
+
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    msg "✅ SOCKS5 代理安装并启动成功！"
+    echo ""
+    show_connection_info "${port}" "${user}" "${pass}"
   else
-    port="$(gen_port)"
-    user="$(gen_user)"
-    pass="$(gen_pass)"
-    echo -e "  ${DIM}已随机生成新配置${RESET}"
+    err "服务启动失败，请查看日志: journalctl -u ${SERVICE_NAME}"
   fi
 
-  SOCKS_PORT="${port}"
-  SOCKS_USER="${user}"
-  SOCKS_PASS="${pass}"
-
-  write_service "${port}" "${user}" "${pass}"
-  svc_enable_start
-  save_cred
-
-  if [[ "${old_port}" != "${port}" ]]; then
-    close_firewall_port "${old_port}"
-    open_firewall_port "${port}"
-  fi
-
-  banner
-  msg "修改完成"
-  show_proxy_info
-  pause
-  return 0
+  press_any_key
 }
 
-do_uninstall() {
-  local ans old_port
+# ---- 启动 ----
+start_service() {
+  if ! systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    warn "服务未安装，请先安装"
+    press_any_key
+    return
+  fi
+  systemctl start "${SERVICE_NAME}"
+  sleep 1
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    msg "✅ 服务已启动"
+  else
+    err "启动失败"
+  fi
+  press_any_key
+}
 
-  banner
-  echo -e "  ${BOLD}卸载 SOCKS5${RESET}"
+# ---- 停止 ----
+stop_service() {
+  systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+  msg "✅ 服务已停止"
+  press_any_key
+}
+
+# ---- 重启 ----
+restart_service() {
+  systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+  sleep 1
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    msg "✅ 服务已重启"
+  else
+    err "重启失败"
+  fi
+  press_any_key
+}
+
+# ---- 状态 ----
+show_status() {
   echo ""
-  read -rp "  确认卸载？[y/N]: " ans
-  [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]] || return 0
-
-  old_port=""
-  load_cred 2>/dev/null && old_port="${SOCKS_PORT:-}" || true
-
-  svc_stop_disable
-
-  [[ -n "${old_port}" ]] && close_firewall_port "${old_port}"
-
-  rm -f "${MICROSOCKS_BIN}"
-  rm -f "${SVC_FILE_SYSTEMD}"
-  rm -f "${SVC_FILE_OPENRC}"
-  rm -f "${CRED_FILE}"
-  rm -f "${SCRIPT_PATH}"
-
-  if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    echo -e "  服务状态: ${GREEN}● 运行中${NC}"
+  else
+    echo -e "  服务状态: ${RED}● 已停止${NC}"
   fi
-
-  banner
-  msg "卸载完成"
-  pause
-  return 0
+  echo ""
+  systemctl status "${SERVICE_NAME}" --no-pager 2>/dev/null || warn "服务未安装"
+  press_any_key
 }
 
-install_self_cmd() {
-  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-    local src
-    src="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-    if [[ "${src}" != "${SCRIPT_PATH}" ]]; then
-      cp -f "${src}" "${SCRIPT_PATH}" 2>/dev/null || true
-      chmod +x "${SCRIPT_PATH}" 2>/dev/null || true
-    fi
-  fi
-  return 0
-}
+# ---- 连接信息 ----
+show_connection_info() {
+  local port="${1:-}" user="${2:-}" pass="${3:-}"
 
-# ========================================
-#  主菜单
-# ========================================
-
-main_menu() {
-  while true; do
-    banner
-
-    if svc_is_active 2>/dev/null; then
-      local info=""
-      load_cred 2>/dev/null && info="  端口=${GREEN}${SOCKS_PORT}${RESET}" || true
-      echo -e "  状态: ${GREEN}● 运行中${RESET}${info}"
+  if [[ -z "${port}" ]]; then
+    if load_user_data; then
+      port="${CURRENT_PORT}"
+      user="${CURRENT_USER}"
+      pass="${CURRENT_PASS}"
     else
-      echo -e "  状态: ${RED}✗ 未运行${RESET}"
+      warn "未找到配置信息，请先安装"
+      return
     fi
-    echo ""
+  fi
 
-    echo -e "  1) 安装"
-    echo -e "  2) 查看状态"
-    echo -e "  3) 查看代理"
-    echo -e "  4) 编辑代理"
-    echo -e "  5) 卸载"
-    echo -e "  0) 退出"
-    echo ""
-    read -rp "  请选择 [0-5]: " choice || choice=""
+  local ip
+  ip="$(get_public_ip)"
+  [[ -z "${ip}" ]] && ip="<服务器IP>"
 
-    case "${choice:-}" in
-      1) do_install   ;;
-      2) do_status    ;;
-      3) do_view      ;;
-      4) do_edit      ;;
-      5) do_uninstall ;;
-      0) echo ""; exit 0 ;;
-      *) ;;
-    esac
+  echo -e "${CYAN}${BOLD}"
+  echo "  ╔══════════════════════════════════════════════╗"
+  echo "  ║          SOCKS5 代理连接信息                 ║"
+  echo "  ╠══════════════════════════════════════════════╣"
+  echo -e "  ║  地址:   ${ip}"
+  echo -e "  ║  端口:   ${port}"
+  echo -e "  ║  用户名: ${user}"
+  echo -e "  ║  密码:   ${pass}"
+  echo "  ╠══════════════════════════════════════════════╣"
+  echo -e "  ║  URL:  socks5://${user}:${pass}@${ip}:${port}"
+  echo "  ╚══════════════════════════════════════════════╝"
+  echo -e "${NC}"
+}
+
+show_info() {
+  echo ""
+  show_connection_info
+  press_any_key
+}
+
+# ---- 修改配置 ----
+modify_config() {
+  echo ""
+  if ! load_user_data; then
+    warn "未找到现有配置，请先安装"
+    press_any_key
+    return
+  fi
+
+  echo "  当前配置:"
+  echo "    端口:   ${CURRENT_PORT}"
+  echo "    用户名: ${CURRENT_USER}"
+  echo "    密码:   ${CURRENT_PASS}"
+  echo ""
+
+  read -rp "新端口 (留空不变): " new_port
+  read -rp "新用户名 (留空不变): " new_user
+  read -rp "新密码 (留空不变): " new_pass
+
+  local port="${new_port:-${CURRENT_PORT}}"
+  local user="${new_user:-${CURRENT_USER}}"
+  local pass="${new_pass:-${CURRENT_PASS}}"
+
+  # 端口变更时处理防火墙
+  if [[ "${port}" != "${CURRENT_PORT}" ]]; then
+    close_firewall "${CURRENT_PORT}"
+    open_firewall "${port}"
+  fi
+
+  generate_config "${port}" "${user}" "${pass}"
+  systemctl restart "${SERVICE_NAME}" 2>/dev/null
+
+  sleep 1
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    msg "✅ 配置已更新并重启成功"
+    echo ""
+    show_connection_info "${port}" "${user}" "${pass}"
+  else
+    err "重启失败，请检查日志"
+  fi
+
+  press_any_key
+}
+
+# ---- 更新脚本 ----
+update_script() {
+  echo ""
+  msg "正在检查更新..."
+  local tmp="/tmp/socks_update_$$.sh"
+
+  if curl -sL --max-time 15 "${SCRIPT_URL}?t=$(date +%s)" -o "${tmp}" 2>/dev/null; then
+    if [[ -s "${tmp}" ]] && grep -q "SCRIPT_URL" "${tmp}"; then
+      cp -f "${tmp}" "${SCRIPT_PATH}" && chmod +x "${SCRIPT_PATH}"
+      rm -f "${tmp}"
+      msg "✅ 更新成功，即将重新加载..."
+      sleep 1
+      exec "${SCRIPT_PATH}"
+    else
+      rm -f "${tmp}"
+      err "下载的文件校验失败，更新已取消"
+    fi
+  else
+    err "下载失败，请检查网络连接"
+  fi
+
+  press_any_key
+}
+
+# ---- 完整卸载 ----
+full_uninstall() {
+  echo ""
+  echo -e "${RED}${BOLD}"
+  echo "  ╔══════════════════════════════════════════════╗"
+  echo "  ║            ⚠️  完整卸载警告                   ║"
+  echo "  ╠══════════════════════════════════════════════╣"
+  echo "  ║  将执行以下操作:                             ║"
+  echo "  ║    1. 停止并删除代理服务                     ║"
+  echo "  ║    2. 删除 Xray 程序文件                     ║"
+  echo "  ║    3. 删除所有配置和日志                     ║"
+  echo "  ║    4. 清理防火墙规则                         ║"
+  echo "  ║    5. 删除快捷命令 socks                     ║"
+  echo "  ║    6. 恢复系统到安装前状态                   ║"
+  echo "  ╚══════════════════════════════════════════════╝"
+  echo -e "${NC}"
+
+  read -rp "确认完整卸载？输入 YES 继续: " confirm
+  if [[ "${confirm}" != "YES" ]]; then
+    msg "已取消卸载"
+    press_any_key
+    return
+  fi
+
+  msg "开始卸载..."
+
+  # 1. 读取端口用于清理防火墙
+  local saved_port=""
+  if load_user_data; then
+    saved_port="${CURRENT_PORT}"
+  fi
+
+  # 2. 停止并禁用服务
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    systemctl stop "${SERVICE_NAME}" 2>/dev/null
+    msg "  ✔ 已停止服务: ${SERVICE_NAME}"
+  fi
+  if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    systemctl disable "${SERVICE_NAME}" 2>/dev/null
+    msg "  ✔ 已禁用服务: ${SERVICE_NAME}"
+  fi
+  if [[ -f "${SERVICE_FILE}" ]]; then
+    rm -f "${SERVICE_FILE}"
+    msg "  ✔ 已删除服务文件: ${SERVICE_FILE}"
+  fi
+  systemctl daemon-reload 2>/dev/null
+
+  # 3. 删除 Xray 二进制
+  if [[ -f "${XRAY_BIN}" ]]; then
+    rm -f "${XRAY_BIN}"
+    msg "  ✔ 已删除程序: ${XRAY_BIN}"
+  fi
+
+  # 4. 删除配置和日志目录
+  local dirs=("${INSTALL_DIR}" "${LOG_DIR}")
+  for d in "${dirs[@]}"; do
+    if [[ -d "${d}" ]]; then
+      rm -rf "${d}"
+      msg "  ✔ 已删除目录: ${d}"
+    fi
+  done
+
+  # 5. 清理防火墙
+  if [[ -n "${saved_port}" ]]; then
+    close_firewall "${saved_port}"
+    msg "  ✔ 已清理防火墙规则: 端口 ${saved_port}"
+  fi
+
+  # 6. 删除快捷命令（脚本自身）
+  # 先判断当前是否从 SCRIPT_PATH 运行，是的话最后删
+  local self_path=""
+  self_path="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+
+  if [[ -f "${SCRIPT_PATH}" ]]; then
+    rm -f "${SCRIPT_PATH}"
+    msg "  ✔ 已删除快捷命令: ${SCRIPT_PATH}"
+  fi
+
+  # 如果用户用本地脚本跑的，也提示
+  if [[ -n "${self_path}" && -f "${self_path}" && "${self_path}" != "${SCRIPT_PATH}" ]]; then
+    echo ""
+    warn "当前脚本文件: ${self_path}"
+    read -rp "  是否也删除此文件？[y/N]: " del_self
+    if [[ "${del_self,,}" == "y" ]]; then
+      rm -f "${self_path}"
+      msg "  ✔ 已删除: ${self_path}"
+    fi
+  fi
+
+  echo ""
+  echo -e "${GREEN}${BOLD}"
+  echo "  ╔══════════════════════════════════════════════╗"
+  echo "  ║     ✅ 卸载完成，系统已恢复到安装前状态     ║"
+  echo "  ╚══════════════════════════════════════════════╝"
+  echo -e "${NC}"
+
+  exit 0
+}
+
+# ======================== 菜单 ========================
+show_menu() {
+  clear
+
+  # 服务状态
+  local status_text
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    status_text="${GREEN}● 运行中${NC}"
+  elif [[ -f "${SERVICE_FILE}" ]]; then
+    status_text="${RED}● 已停止${NC}"
+  else
+    status_text="${YELLOW}● 未安装${NC}"
+  fi
+
+  echo -e "${CYAN}${BOLD}"
+  echo "  ╔══════════════════════════════════════════════╗"
+  echo "  ║         SOCKS5 代理管理面板                  ║"
+  echo "  ╚══════════════════════════════════════════════╝"
+  echo -e "${NC}"
+  echo -e "  当前状态: ${status_text}"
+  echo ""
+  echo -e "  ${BOLD}── 代理管理 ──────────────────────────${NC}"
+  echo "  1) 安装 SOCKS5 代理"
+  echo "  2) 启动服务"
+  echo "  3) 停止服务"
+  echo "  4) 重启服务"
+  echo ""
+  echo -e "  ${BOLD}── 信息查看 ──────────────────────────${NC}"
+  echo "  5) 查看服务状态"
+  echo "  6) 查看连接信息"
+  echo ""
+  echo -e "  ${BOLD}── 配置维护 ──────────────────────────${NC}"
+  echo "  7) 修改配置 (端口/用户名/密码)"
+  echo "  8) 更新脚本"
+  echo "  9) 完整卸载"
+  echo ""
+  echo "  0) 退出"
+  echo ""
+  read -rp "  请选择 [0-9]: " choice
+
+  case "${choice}" in
+    1) install_proxy   ;;
+    2) start_service   ;;
+    3) stop_service    ;;
+    4) restart_service ;;
+    5) show_status     ;;
+    6) show_info       ;;
+    7) modify_config   ;;
+    8) update_script   ;;
+    9) full_uninstall  ;;
+    0) echo ""; msg "再见！"; exit 0 ;;
+    *) warn "无效选项，请重新选择"; sleep 1 ;;
+  esac
+}
+
+# ======================== 主入口 ========================
+main() {
+  check_root
+  check_os
+  install_self_cmd
+
+  while true; do
+    show_menu
   done
 }
 
-# ========================================
-#  入口
-# ========================================
-
-check_root
-detect_os
-install_self_cmd
-main_menu
+main "$@"
