@@ -151,9 +151,9 @@ get_local_ip() {
 
 get_public_ip() {
   local ip=""
-  ip="$(curl -s --max-time 5 ifconfig.me 2>/dev/null || true)"
-  [[ -z "${ip}" ]] && ip="$(curl -s --max-time 5 ip.sb 2>/dev/null || true)"
-  [[ -z "${ip}" ]] && ip="$(curl -s --max-time 5 api.ipify.org 2>/dev/null || true)"
+  ip="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || true)"
+  [[ -z "${ip}" ]] && ip="$(curl -4 -s --max-time 5 ip.sb 2>/dev/null || true)"
+  [[ -z "${ip}" ]] && ip="$(curl -4 -s --max-time 5 api.ipify.org 2>/dev/null || true)"
   echo "${ip}"
 }
 
