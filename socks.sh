@@ -44,13 +44,13 @@ err()  { echo -e "${RED}[ERR]${RESET} $*" >&2; }
 
 pause() {
   echo ""
-  read -rp "按回车继续..." _ || true
+  read -rp "  按回车继续..." _ || true
 }
 
 banner() {
   command -v clear >/dev/null 2>&1 && clear 2>/dev/null || true
-  echo -e "${BOLD}${CYAN}SOCKS5 管理面板${RESET} ${DIM}(${OS_ID})${RESET}"
-  echo "----------------------------------------"
+  echo -e "${BOLD}${CYAN}  SOCKS5 管理面板${RESET} ${DIM}(${OS_ID})${RESET}"
+  echo "  ----------------------------------------"
   echo ""
 }
 
@@ -129,47 +129,29 @@ detect_os() {
       ;;
     *)
       if command_exists apt-get; then
-        OS_FAMILY="debian"
-        PKG_MGR="apt"
-        SVC_NAME="danted"
-        CONF_FILE="/etc/danted.conf"
-        SOCKD_BIN="/usr/sbin/danted"
-        PKG_NAME="dante-server"
+        OS_FAMILY="debian"; PKG_MGR="apt"
+        SVC_NAME="danted"; CONF_FILE="/etc/danted.conf"
+        SOCKD_BIN="/usr/sbin/danted"; PKG_NAME="dante-server"
       elif command_exists dnf; then
-        OS_FAMILY="rhel"
-        PKG_MGR="dnf"
-        SVC_NAME="sockd"
-        CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"
-        PKG_NAME="dante-server"
+        OS_FAMILY="rhel"; PKG_MGR="dnf"
+        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
+        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
       elif command_exists yum; then
-        OS_FAMILY="rhel"
-        PKG_MGR="yum"
-        SVC_NAME="sockd"
-        CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"
-        PKG_NAME="dante-server"
+        OS_FAMILY="rhel"; PKG_MGR="yum"
+        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
+        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
       elif command_exists apk; then
-        OS_FAMILY="alpine"
-        PKG_MGR="apk"
-        SVC_NAME="sockd"
-        CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"
-        PKG_NAME="dante-server"
+        OS_FAMILY="alpine"; PKG_MGR="apk"
+        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
+        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
       elif command_exists pacman; then
-        OS_FAMILY="arch"
-        PKG_MGR="pacman"
-        SVC_NAME="sockd"
-        CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/bin/sockd"
-        PKG_NAME="dante"
+        OS_FAMILY="arch"; PKG_MGR="pacman"
+        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
+        SOCKD_BIN="/usr/bin/sockd"; PKG_NAME="dante"
       elif command_exists zypper; then
-        OS_FAMILY="suse"
-        PKG_MGR="zypper"
-        SVC_NAME="sockd"
-        CONF_FILE="/etc/sockd.conf"
-        SOCKD_BIN="/usr/sbin/sockd"
-        PKG_NAME="dante-server"
+        OS_FAMILY="suse"; PKG_MGR="zypper"
+        SVC_NAME="sockd"; CONF_FILE="/etc/sockd.conf"
+        SOCKD_BIN="/usr/sbin/sockd"; PKG_NAME="dante-server"
       else
         err "无法识别系统"
         exit 1
@@ -209,7 +191,8 @@ load_cred() {
 
 get_default_if() {
   local iface=""
-  iface="$(ip route get 8.8.8.8 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+  iface="$(ip route get 8.8.8.8 2>/dev/null \
+    | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
   if [[ -z "${iface}" ]]; then
     iface="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')"
   fi
@@ -218,7 +201,8 @@ get_default_if() {
 
 get_local_ip() {
   local ipaddr=""
-  ipaddr="$(ip route get 8.8.8.8 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  ipaddr="$(ip route get 8.8.8.8 2>/dev/null \
+    | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
   if [[ -z "${ipaddr}" ]]; then
     ipaddr="$(hostname -I 2>/dev/null | awk '{print $1}')"
   fi
@@ -268,36 +252,52 @@ svc_stop() {
 
 open_firewall_port() {
   local port="$1"
-
   if command_exists ufw; then
     ufw allow "${port}/tcp" >/dev/null 2>&1 || true
     ufw allow "${port}/udp" >/dev/null 2>&1 || true
   fi
-
   if command_exists firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
     firewall-cmd --permanent --add-port="${port}/udp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
-
   return 0
 }
 
 close_firewall_port() {
   local port="$1"
-
   if command_exists ufw; then
     ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
     ufw delete allow "${port}/udp" >/dev/null 2>&1 || true
   fi
-
   if command_exists firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null 2>&1 || true
     firewall-cmd --permanent --remove-port="${port}/udp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
-
   return 0
+}
+
+# ========================================
+#  随机生成
+# ========================================
+
+gen_port() {
+  shuf -i 10000-59999 -n 1 2>/dev/null || echo $(( RANDOM % 49999 + 10000 ))
+}
+
+gen_user() {
+  local suffix
+  suffix="$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || true)"
+  [[ -n "${suffix}" ]] || suffix="$RANDOM"
+  echo "socks${suffix}"
+}
+
+gen_pass() {
+  local p
+  p="$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || true)"
+  [[ -n "${p}" ]] || p="Socks$(date +%s)$RANDOM"
+  echo "${p}"
 }
 
 # ========================================
@@ -309,26 +309,43 @@ install_packages() {
     apt)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y
-      apt-get install -y "${PKG_NAME}" iproute2 curl passwd
+
+      local ok=0
+      for pkg in dante-server dante; do
+        if apt-get install -y "$pkg" iproute2 curl passwd 2>/dev/null; then
+          PKG_NAME="$pkg"
+          ok=1
+          break
+        fi
+      done
+
+      if [[ "${ok}" -ne 1 ]]; then
+        err "源中未找到 dante-server 或 dante，请检查软件源"
+        return 1
+      fi
       ;;
     yum)
       yum install -y epel-release >/dev/null 2>&1 || true
-      yum install -y "${PKG_NAME}" iproute curl passwd || yum install -y dante iproute curl passwd
+      yum install -y dante-server iproute curl passwd 2>/dev/null \
+        || yum install -y dante iproute curl passwd
       ;;
     dnf)
       dnf install -y epel-release >/dev/null 2>&1 || true
-      dnf install -y "${PKG_NAME}" iproute curl shadow-utils || dnf install -y dante iproute curl shadow-utils
+      dnf install -y dante-server iproute curl shadow-utils 2>/dev/null \
+        || dnf install -y dante iproute curl shadow-utils
       ;;
     apk)
       apk update
-      apk add "${PKG_NAME}" iproute2 curl shadow
+      apk add dante-server iproute2 curl shadow
       ;;
     pacman)
-      pacman -Sy --noconfirm "${PKG_NAME}" iproute2 curl
+      pacman -Sy --noconfirm dante iproute2 curl
+      PKG_NAME="dante"
       ;;
     zypper)
       zypper --non-interactive refresh
-      zypper --non-interactive install "${PKG_NAME}" iproute2 curl shadow
+      zypper --non-interactive install dante-server iproute2 curl shadow 2>/dev/null \
+        || zypper --non-interactive install dante iproute2 curl shadow
       ;;
     *)
       err "不支持的包管理器: ${PKG_MGR}"
@@ -345,12 +362,11 @@ ensure_socks_user() {
   if id "${username}" >/dev/null 2>&1; then
     echo "${username}:${password}" | chpasswd
   else
-    useradd -M -s /usr/sbin/nologin "${username}" 2>/dev/null || \
-    useradd -M -s /sbin/nologin "${username}" 2>/dev/null || \
-    useradd -M -s /bin/false "${username}"
+    useradd -M -s /usr/sbin/nologin "${username}" 2>/dev/null \
+      || useradd -M -s /sbin/nologin "${username}" 2>/dev/null \
+      || useradd -M -s /bin/false "${username}"
     echo "${username}:${password}" | chpasswd
   fi
-
   return 0
 }
 
@@ -409,19 +425,20 @@ install_dante() {
   fi
 
   msg "开始安装 Dante..."
-  install_packages
+  install_packages || return 1
 
   if ! command_exists "${SOCKD_BIN}"; then
-    if [[ -x /usr/sbin/danted ]]; then
-      SOCKD_BIN="/usr/sbin/danted"
-    elif [[ -x /usr/sbin/sockd ]]; then
-      SOCKD_BIN="/usr/sbin/sockd"
-    elif [[ -x /usr/bin/sockd ]]; then
-      SOCKD_BIN="/usr/bin/sockd"
-    else
-      err "安装完成，但未找到 sockd/danted 可执行文件"
-      return 1
-    fi
+    for bin in /usr/sbin/danted /usr/sbin/sockd /usr/bin/sockd; do
+      if [[ -x "${bin}" ]]; then
+        SOCKD_BIN="${bin}"
+        break
+      fi
+    done
+  fi
+
+  if ! command_exists "${SOCKD_BIN}" && [[ ! -x "${SOCKD_BIN}" ]]; then
+    err "安装完成但未找到 sockd/danted 可执行文件"
+    return 1
   fi
 
   return 0
@@ -432,12 +449,14 @@ show_proxy_info() {
   ipaddr="$(get_local_ip)"
 
   echo ""
-  echo -e "  地址: ${GREEN}${ipaddr:-unknown}${RESET}"
-  echo -e "  端口: ${GREEN}${SOCKS_PORT:-unknown}${RESET}"
-  echo -e "  用户: ${GREEN}${SOCKS_USER:-unknown}${RESET}"
-  echo -e "  密码: ${GREEN}${SOCKS_PASS:-unknown}${RESET}"
-  echo ""
-  echo -e "  格式: ${CYAN}${ipaddr:-IP}:${SOCKS_PORT:-PORT}:${SOCKS_USER:-USER}:${SOCKS_PASS:-PASS}${RESET}"
+  echo -e "  ┌──────────────────────────────────"
+  echo -e "  │  地址: ${GREEN}${ipaddr:-unknown}${RESET}"
+  echo -e "  │  端口: ${GREEN}${SOCKS_PORT:-unknown}${RESET}"
+  echo -e "  │  用户: ${GREEN}${SOCKS_USER:-unknown}${RESET}"
+  echo -e "  │  密码: ${GREEN}${SOCKS_PASS:-unknown}${RESET}"
+  echo -e "  │"
+  echo -e "  │  格式: ${CYAN}${ipaddr:-IP}:${SOCKS_PORT:-PORT}:${SOCKS_USER:-USER}:${SOCKS_PASS:-PASS}${RESET}"
+  echo -e "  └──────────────────────────────────"
   echo ""
 }
 
@@ -447,33 +466,13 @@ show_proxy_info() {
 
 do_install() {
   local port user pass ext_if
+  local use_random
 
   banner
-  echo -e "${BOLD}安装 SOCKS5${RESET}"
+  echo -e "  ${BOLD}安装 SOCKS5${RESET}"
   echo ""
 
-  read -rp "请输入端口 [1080]: " port
-  port="${port:-1080}"
-  if ! validate_port "${port}"; then
-    err "端口无效"
-    pause
-    return 0
-  fi
-
-  read -rp "请输入用户名 [socks]: " user
-  user="${user:-socks}"
-  if ! validate_username "${user}"; then
-    err "用户名无效，仅允许字母、数字、点、下划线、横线"
-    pause
-    return 0
-  fi
-
-  read -rp "请输入密码 [随机生成]: " pass
-  if [[ -z "${pass}" ]]; then
-    pass="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12 || true)"
-    [[ -n "${pass}" ]] || pass="Socks$(date +%s)"
-  fi
-
+  # ── 先安装，再问配置 ──────────────────────
   ext_if="$(get_default_if)"
   if [[ -z "${ext_if}" ]]; then
     err "无法检测默认网卡"
@@ -481,10 +480,49 @@ do_install() {
     return 0
   fi
 
-  msg "系统: ${OS_ID}, 包管理器: ${PKG_MGR}, init: ${INIT_SYS}"
-  msg "出口网卡: ${ext_if}"
+  msg "系统: ${OS_ID} | 包管理器: ${PKG_MGR} | init: ${INIT_SYS} | 网卡: ${ext_if}"
+  echo ""
 
-  install_dante
+  install_dante || { err "安装 Dante 失败"; pause; return 0; }
+
+  # ── 询问配置方式 ──────────────────────────
+  echo ""
+  echo -e "  ${BOLD}配置代理参数${RESET}"
+  echo ""
+  echo -e "  y) 全部随机生成"
+  echo -e "  n) 手动输入"
+  echo ""
+  read -rp "  是否随机生成配置? [Y/n]: " use_random
+  use_random="${use_random:-y}"
+
+  echo ""
+
+  if [[ "${use_random,,}" == "y" || "${use_random,,}" == "yes" || "${use_random}" == "" ]]; then
+    port="$(gen_port)"
+    user="$(gen_user)"
+    pass="$(gen_pass)"
+    echo -e "  ${DIM}已随机生成配置${RESET}"
+  else
+    while true; do
+      read -rp "  端口: " port
+      validate_port "${port}" && break
+      err "端口无效，请输入 1-65535 之间的数字"
+    done
+
+    while true; do
+      read -rp "  用户名: " user
+      validate_username "${user}" && break
+      err "用户名无效，仅允许字母、数字、点、下划线、横线"
+    done
+
+    while true; do
+      read -rp "  密码: " pass
+      [[ -n "${pass}" ]] && break
+      err "密码不能为空"
+    done
+  fi
+
+  # ── 写配置 启动服务 ───────────────────────
   ensure_socks_user "${user}" "${pass}"
   write_config "${port}" "${ext_if}"
   svc_enable
@@ -505,46 +543,45 @@ do_install() {
 
 do_status() {
   banner
-  echo -e "${BOLD}服务状态${RESET}"
+  echo -e "  ${BOLD}服务状态${RESET}"
   echo ""
-
-  echo -e "  系统: ${CYAN}${OS_ID}${RESET}"
-  echo -e "  家族: ${CYAN}${OS_FAMILY}${RESET}"
+  echo -e "  系统:     ${CYAN}${OS_ID}${RESET}"
+  echo -e "  家族:     ${CYAN}${OS_FAMILY}${RESET}"
   echo -e "  包管理器: ${CYAN}${PKG_MGR}${RESET}"
-  echo -e "  init: ${CYAN}${INIT_SYS}${RESET}"
-  echo -e "  服务名: ${CYAN}${SVC_NAME}${RESET}"
+  echo -e "  init:     ${CYAN}${INIT_SYS}${RESET}"
+  echo -e "  服务名:   ${CYAN}${SVC_NAME}${RESET}"
   echo -e "  配置文件: ${CYAN}${CONF_FILE}${RESET}"
-  echo -e "  可执行文件: ${CYAN}${SOCKD_BIN}${RESET}"
   echo ""
 
-  if svc_is_active; then
+  if svc_is_active 2>/dev/null; then
     echo -e "  状态: ${GREEN}● 运行中${RESET}"
   else
     echo -e "  状态: ${RED}✗ 未运行${RESET}"
   fi
 
-  if load_cred; then
+  if load_cred 2>/dev/null; then
     echo -e "  端口: ${GREEN}${SOCKS_PORT}${RESET}"
     echo -e "  用户: ${GREEN}${SOCKS_USER}${RESET}"
   fi
 
   echo ""
   if [[ "${INIT_SYS}" == "systemd" ]]; then
-    systemctl --no-pager --full status "${SVC_NAME}" 2>/dev/null | sed -n '1,12p' || true
+    systemctl --no-pager --full status "${SVC_NAME}" 2>/dev/null | head -15 || true
   fi
+
   pause
   return 0
 }
 
 do_view() {
   banner
-  echo -e "${BOLD}代理信息${RESET}"
+  echo -e "  ${BOLD}代理信息${RESET}"
 
-  if load_cred; then
+  if load_cred 2>/dev/null; then
     show_proxy_info
   else
     echo ""
-    warn "未找到已保存的代理信息"
+    warn "未找到已保存的代理信息，请先安装"
     echo ""
   fi
 
@@ -554,8 +591,9 @@ do_view() {
 
 do_edit() {
   local port user pass ext_if old_port
+  local use_random
 
-  if ! load_cred; then
+  if ! load_cred 2>/dev/null; then
     warn "未找到已有配置，请先安装"
     pause
     return 0
@@ -565,27 +603,42 @@ do_edit() {
   ext_if="$(get_default_if)"
 
   banner
-  echo -e "${BOLD}编辑代理${RESET}"
+  echo -e "  ${BOLD}编辑代理${RESET}"
+  echo ""
+  echo -e "  当前配置:"
+  echo -e "  端口: ${CYAN}${SOCKS_PORT}${RESET}  用户: ${CYAN}${SOCKS_USER}${RESET}  密码: ${CYAN}${SOCKS_PASS}${RESET}"
+  echo ""
+  echo -e "  y) 全部重新随机生成"
+  echo -e "  n) 手动修改"
+  echo ""
+  read -rp "  是否随机生成新配置? [Y/n]: " use_random
+  use_random="${use_random:-y}"
+
   echo ""
 
-  read -rp "请输入端口 [${SOCKS_PORT}]: " port
-  port="${port:-$SOCKS_PORT}"
-  if ! validate_port "${port}"; then
-    err "端口无效"
-    pause
-    return 0
-  fi
+  if [[ "${use_random,,}" == "y" || "${use_random,,}" == "yes" || "${use_random}" == "" ]]; then
+    port="$(gen_port)"
+    user="$(gen_user)"
+    pass="$(gen_pass)"
+    echo -e "  ${DIM}已随机生成新配置${RESET}"
+  else
+    while true; do
+      read -rp "  端口 (当前 ${SOCKS_PORT}): " port
+      port="${port:-${SOCKS_PORT}}"
+      validate_port "${port}" && break
+      err "端口无效"
+    done
 
-  read -rp "请输入用户名 [${SOCKS_USER}]: " user
-  user="${user:-$SOCKS_USER}"
-  if ! validate_username "${user}"; then
-    err "用户名无效"
-    pause
-    return 0
-  fi
+    while true; do
+      read -rp "  用户名 (当前 ${SOCKS_USER}): " user
+      user="${user:-${SOCKS_USER}}"
+      validate_username "${user}" && break
+      err "用户名无效"
+    done
 
-  read -rp "请输入密码 [保持原值]: " pass
-  pass="${pass:-$SOCKS_PASS}"
+    read -rp "  密码 (直接回车保持不变): " pass
+    pass="${pass:-${SOCKS_PASS}}"
+  fi
 
   ensure_socks_user "${user}" "${pass}"
   write_config "${port}" "${ext_if}"
@@ -617,10 +670,12 @@ remove_package() {
       apt-get autoremove -y >/dev/null 2>&1 || true
       ;;
     yum)
-      yum remove -y "${PKG_NAME}" >/dev/null 2>&1 || yum remove -y dante >/dev/null 2>&1 || true
+      yum remove -y "${PKG_NAME}" >/dev/null 2>&1 \
+        || yum remove -y dante >/dev/null 2>&1 || true
       ;;
     dnf)
-      dnf remove -y "${PKG_NAME}" >/dev/null 2>&1 || dnf remove -y dante >/dev/null 2>&1 || true
+      dnf remove -y "${PKG_NAME}" >/dev/null 2>&1 \
+        || dnf remove -y dante >/dev/null 2>&1 || true
       ;;
     apk)
       apk del "${PKG_NAME}" >/dev/null 2>&1 || true
@@ -639,21 +694,20 @@ do_uninstall() {
   local ans old_port old_user
 
   banner
-  echo -e "${BOLD}卸载 SOCKS5${RESET}"
+  echo -e "  ${BOLD}卸载 SOCKS5${RESET}"
   echo ""
-  read -rp "确认卸载？[y/N]: " ans
+  read -rp "  确认卸载？[y/N]: " ans
   [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]] || return 0
 
   old_port=""
   old_user=""
 
-  if load_cred; then
+  if load_cred 2>/dev/null; then
     old_port="${SOCKS_PORT:-}"
     old_user="${SOCKS_USER:-}"
   fi
 
   svc_stop
-
   [[ -n "${old_port}" ]] && close_firewall_port "${old_port}"
 
   rm -f "${CONF_FILE}"
@@ -678,6 +732,10 @@ install_self_cmd() {
   fi
   return 0
 }
+
+# ========================================
+#  主菜单
+# ========================================
 
 main_menu() {
   while true; do
