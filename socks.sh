@@ -492,3 +492,219 @@ do_install() {
   fw_allow "${port}"
 
   echo -e "  [5/5] 启动服务..."
+  svc_enable
+  svc_restart
+  sleep 1
+
+  save_cred "${port}" "${user}" "${pass}"
+  install_shortcut
+
+  echo ""
+  if svc_is_active; then
+    echo -e "  ${GREEN}✅ 安装完成${RESET}"
+  else
+    echo -e "  ${YELLOW}⚠ 安装完成但服务未运行，请检查日志${RESET}"
+  fi
+  echo ""
+  show_proxy_info
+  press_enter
+}
+
+# ========================================
+#  查看状态
+# ========================================
+
+do_status() {
+  banner
+
+  if svc_is_active; then
+    echo -e "  服务:      ${GREEN}● 运行中${RESET}"
+  else
+    echo -e "  服务:      ${RED}✗ 未运行${RESET}"
+  fi
+
+  if svc_is_enabled; then
+    echo -e "  开机自启:  ${GREEN}✓ 已启用${RESET}"
+  else
+    echo -e "  开机自启:  ${RED}✗ 未启用${RESET}"
+  fi
+
+  echo -e "  系统:      ${CYAN}${OS_ID} (${INIT_SYS})${RESET}"
+
+  if load_cred; then
+    local listen=""
+    listen=$(ss -lntp 2>/dev/null | grep ":${SOCKS_PORT} " || true)
+    if [[ -n "${listen}" ]]; then
+      echo -e "  端口监听:  ${GREEN}✓ ${SOCKS_PORT}${RESET}"
+    else
+      echo -e "  端口监听:  ${RED}✗ ${SOCKS_PORT}${RESET}"
+    fi
+
+    local conns="0"
+    conns=$(ss -tnp 2>/dev/null | grep -c ":${SOCKS_PORT} " || echo "0")
+    echo -e "  当前连接:  ${CYAN}${conns}${RESET}"
+    echo -e "  安装时间:  ${DIM}${INSTALL_DATE:-未知}${RESET}"
+  else
+    echo -e "  ${YELLOW}未安装${RESET}"
+  fi
+
+  local proc_name mem
+  proc_name=$(basename "${SOCKD_BIN}" 2>/dev/null || echo "sockd")
+  mem=$(ps -C "${proc_name}" -o rss= 2>/dev/null | awk '{s+=$1} END{if(s>0) printf "%.1f MB", s/1024; else print "N/A"}' || echo "N/A")
+  echo -e "  内存占用:  ${CYAN}${mem}${RESET}"
+
+  press_enter
+}
+
+do_view() { banner; show_proxy_info; press_enter; }
+
+# ========================================
+#  编辑代理
+# ========================================
+
+do_edit() {
+  banner
+  if ! load_cred; then
+    echo -e "  ${RED}未安装，请先安装${RESET}"; press_enter; return
+  fi
+
+  local iface
+  iface=$(get_ext_iface)
+
+  echo -e "  当前: 端口=${GREEN}${SOCKS_PORT}${RESET}  用户=${GREEN}${SOCKS_USER}${RESET}"
+  echo -e "  ${DIM}留空回车 = 保持不变${RESET}"
+  echo ""
+
+  local old_port="${SOCKS_PORT}" old_user="${SOCKS_USER}" old_pass="${SOCKS_PASS}"
+  local new_port new_user new_pass
+
+  read -rp "$(echo -e "  新端口   [${old_port}]: ")" new_port
+  read -rp "$(echo -e "  新用户名 [${old_user}]: ")" new_user
+  read -rp "$(echo -e "  新密码   [不变]: ")" new_pass
+
+  new_port="${new_port:-${old_port}}"
+  new_user="${new_user:-${old_user}}"
+  new_pass="${new_pass:-${old_pass}}"
+
+  if ! [[ "${new_port}" =~ ^[0-9]+$ ]] || (( new_port<1 || new_port>65535 )); then
+    echo -e "  ${RED}端口无效，保持原值${RESET}"; new_port="${old_port}"
+  fi
+
+  if [[ "${new_port}" == "${old_port}" && "${new_user}" == "${old_user}" && "${new_pass}" == "${old_pass}" ]]; then
+    echo -e "\n  ${YELLOW}无修改${RESET}"; press_enter; return
+  fi
+
+  echo ""
+  echo -e "  端口: ${old_port} → ${GREEN}${new_port}${RESET}"
+  echo -e "  用户: ${old_user} → ${GREEN}${new_user}${RESET}"
+  read -rp "$(echo -e "  确认修改? [Y/n]: ")" c
+  [[ "${c:-Y}" =~ ^[Nn]$ ]] && { echo "  已取消"; press_enter; return; }
+
+  if [[ "${new_user}" != "${old_user}" ]]; then
+    userdel "${old_user}" 2>/dev/null || true
+    if ! id "${new_user}" &>/dev/null; then
+      useradd -M -s /usr/sbin/nologin "${new_user}" 2>/dev/null \
+        || adduser -D -s /usr/sbin/nologin "${new_user}" 2>/dev/null || true
+    fi
+  fi
+  echo "${new_user}:${new_pass}" | chpasswd
+
+  if [[ "${new_port}" != "${old_port}" ]]; then
+    fw_deny "${old_port}"; fw_allow "${new_port}"
+  fi
+
+  write_dante_conf "${new_port}" "${iface}"
+  svc_restart; sleep 1
+  save_cred "${new_port}" "${new_user}" "${new_pass}"
+
+  echo ""
+  echo -e "  ${GREEN}✅ 修改完成${RESET}"
+  echo ""
+  show_proxy_info
+  press_enter
+}
+
+# ========================================
+#  卸载
+# ========================================
+
+do_uninstall() {
+  banner
+  echo -e "  ${RED}⚠ 将彻底删除 SOCKS5 服务${RESET}"
+  echo ""
+  read -rp "  输入 YES 确认卸载: " c
+  [[ "${c}" != "YES" ]] && { echo "  已取消"; press_enter; return; }
+
+  local old_user="" old_port=""
+  if load_cred; then
+    old_user="${SOCKS_USER:-}"; old_port="${SOCKS_PORT:-}"
+  fi
+
+  echo ""
+  echo "  [1/5] 停止服务..."
+  svc_stop; svc_disable
+
+  echo "  [2/5] 卸载 dante..."
+  remove_dante
+
+  echo "  [3/5] 清理配置..."
+  rm -f "${CONF_FILE}" "${CONF_FILE}".bak.* "${CRED_FILE}"
+
+  echo "  [4/5] 删除用户..."
+  [[ -n "${old_user}" ]] && { userdel "${old_user}" 2>/dev/null || true; }
+
+  echo "  [5/5] 清理防火墙..."
+  [[ -n "${old_port}" ]] && fw_deny "${old_port}"
+  rm -f "${SCRIPT_PATH}"
+
+  echo ""
+  echo -e "  ${GREEN}✅ 卸载完成${RESET}"
+  echo ""
+  exit 0
+}
+
+# ========================================
+#  主菜单
+# ========================================
+
+main_menu() {
+  while true; do
+    banner
+
+    if svc_is_active 2>/dev/null; then
+      local _info=""
+      load_cred 2>/dev/null && _info="  端口: ${GREEN}${SOCKS_PORT}${RESET}" || true
+      echo -e "  状态: ${GREEN}● 运行中${RESET}${_info}"
+    else
+      echo -e "  状态: ${RED}✗ 未运行${RESET}"
+    fi
+    echo ""
+
+    echo -e "  1) 安装"
+    echo -e "  2) 查看状态"
+    echo -e "  3) 查看代理"
+    echo -e "  4) 编辑代理"
+    echo -e "  5) 卸载"
+    echo -e "  0) 退出"
+    echo ""
+    read -rp "  请选择 [0-5]: " choice
+
+    case "${choice:-}" in
+      1) do_install   ;;
+      2) do_status    ;;
+      3) do_view      ;;
+      4) do_edit      ;;
+      5) do_uninstall ;;
+      0) echo ""; exit 0 ;;
+      *) ;;
+    esac
+  done
+}
+
+# ========================================
+#  入口
+# ========================================
+
+check_root
+detect_os
+main_menu
