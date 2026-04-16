@@ -19,7 +19,6 @@ RESET='\033[0m'
 
 MICROSOCKS_REPO="https://github.com/rofl0r/microsocks/archive/refs/heads/master.tar.gz"
 MICROSOCKS_BIN="/usr/local/bin/microsocks"
-MICROSOCKS_SRC="/tmp/microsocks-master"
 
 SVC_NAME="microsocks"
 SVC_FILE_SYSTEMD="/etc/systemd/system/microsocks.service"
@@ -150,6 +149,14 @@ get_local_ip() {
   echo "${ip}"
 }
 
+get_public_ip() {
+  local ip=""
+  ip="$(curl -s --max-time 5 ifconfig.me 2>/dev/null || true)"
+  [[ -z "${ip}" ]] && ip="$(curl -s --max-time 5 ip.sb 2>/dev/null || true)"
+  [[ -z "${ip}" ]] && ip="$(curl -s --max-time 5 api.ipify.org 2>/dev/null || true)"
+  echo "${ip}"
+}
+
 open_firewall_port() {
   local port="$1"
   if command_exists ufw; then
@@ -275,7 +282,6 @@ svc_enable_start() {
     rc-update add "${SVC_NAME}" default >/dev/null 2>&1 || true
     rc-service "${SVC_NAME}" restart 2>/dev/null || rc-service "${SVC_NAME}" start
   else
-    # 无 init 系统，直接后台运行
     pkill -x microsocks >/dev/null 2>&1 || true
     sleep 0.3
     nohup "${MICROSOCKS_BIN}" -p "${SOCKS_PORT}" -u "${SOCKS_USER}" -P "${SOCKS_PASS}" \
@@ -346,7 +352,6 @@ build_microsocks() {
 
   local srcdir="${tmpdir}/microsocks-master"
   if [[ ! -d "${srcdir}" ]]; then
-    # tar 解出来的目录名不确定时尝试查找
     srcdir="$(find "${tmpdir}" -maxdepth 1 -type d -name 'microsocks*' | head -1)"
     [[ -d "${srcdir}" ]] || { err "找不到源码目录"; return 1; }
   fi
@@ -402,17 +407,20 @@ validate_username() {
 # ========================================
 
 show_proxy_info() {
-  local ipaddr=""
-  ipaddr="$(get_local_ip)"
+  local pub_ip local_ip display_ip
+
+  pub_ip="$(get_public_ip)"
+  local_ip="$(get_local_ip)"
+  display_ip="${pub_ip:-${local_ip:-unknown}}"
 
   echo ""
   echo -e "  ┌──────────────────────────────────"
-  echo -e "  │  地址: ${GREEN}${ipaddr:-unknown}${RESET}"
-  echo -e "  │  端口: ${GREEN}${SOCKS_PORT:-unknown}${RESET}"
-  echo -e "  │  用户: ${GREEN}${SOCKS_USER:-unknown}${RESET}"
-  echo -e "  │  密码: ${GREEN}${SOCKS_PASS:-unknown}${RESET}"
+  echo -e "  │  地址：${CYAN}${display_ip}${RESET}"
+  echo -e "  │  端口：${CYAN}${SOCKS_PORT}${RESET}"
+  echo -e "  │  用户：${CYAN}${SOCKS_USER}${RESET}"
+  echo -e "  │  密码：${CYAN}${SOCKS_PASS}${RESET}"
   echo -e "  │"
-  echo -e "  │  格式: ${CYAN}${ipaddr:-IP}:${SOCKS_PORT:-PORT}:${SOCKS_USER:-USER}:${SOCKS_PASS:-PASS}${RESET}"
+  echo -e "  │  URL：${GREEN}socks5://${SOCKS_USER}:${SOCKS_PASS}@${display_ip}:${SOCKS_PORT}${RESET}"
   echo -e "  └──────────────────────────────────"
   echo ""
 }
@@ -431,10 +439,8 @@ do_install() {
   msg "系统: ${OS_ID} | 包管理器: ${PKG_MGR} | init: ${INIT_SYS}"
   echo ""
 
-  # ── 编译安装 microsocks ──────────────────
   install_microsocks || { err "安装 microsocks 失败"; pause; return 0; }
 
-  # ── 选择配置方式 ─────────────────────────
   echo ""
   echo -e "  ${BOLD}配置代理参数${RESET}"
   echo ""
@@ -468,7 +474,6 @@ do_install() {
     echo -e "  ${DIM}已随机生成配置${RESET}"
   fi
 
-  # ── 写服务 启动 ──────────────────────────
   SOCKS_PORT="${port}"
   SOCKS_USER="${user}"
   SOCKS_PASS="${pass}"
