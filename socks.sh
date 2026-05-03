@@ -51,6 +51,116 @@ press_any_key() {
   read -rp "按回车键返回菜单..." _
 }
 
+sha256_file() {
+  local file="$1"
+
+  if command -v sha256sum &>/dev/null; then
+    sha256sum "${file}" | awk '{print tolower($1)}'
+    return 0
+  fi
+
+  if command -v shasum &>/dev/null; then
+    shasum -a 256 "${file}" | awk '{print tolower($1)}'
+    return 0
+  fi
+
+  err "未找到 sha256sum 或 shasum，无法校验文件完整性"
+  return 1
+}
+
+extract_sha256_from_file() {
+  local checksum_file="$1" target_name="$2"
+
+  awk -v target="${target_name}" '
+    index($0, target) {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[A-Fa-f0-9]{64}$/) {
+          print tolower($i)
+          exit
+        }
+      }
+    }
+  ' "${checksum_file}"
+}
+
+validate_script_file() {
+  local script_path="$1"
+
+  [[ -s "${script_path}" ]] || {
+    err "脚本文件为空: ${script_path}"
+    return 1
+  }
+
+  grep -q '^#!/usr/bin/env bash$' "${script_path}" || {
+    err "脚本缺少预期的 shebang"
+    return 1
+  }
+
+  grep -q '^SCRIPT_URL=' "${script_path}" || {
+    err "脚本缺少关键常量 SCRIPT_URL"
+    return 1
+  }
+
+  grep -q '^main() {$' "${script_path}" || {
+    err "脚本缺少主入口 main()"
+    return 1
+  }
+
+  if ! bash -n "${script_path}"; then
+    err "脚本语法检查失败"
+    return 1
+  fi
+
+  return 0
+}
+
+validate_port() {
+  local port="$1"
+
+  if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+    err "端口必须是数字"
+    return 1
+  fi
+
+  if (( port < 1 || port > 65535 )); then
+    err "端口必须在 1-65535 之间"
+    return 1
+  fi
+
+  return 0
+}
+
+validate_credential() {
+  local field_name="$1" value="$2"
+
+  if [[ -z "${value}" ]]; then
+    err "${field_name}不能为空"
+    return 1
+  fi
+
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    err "${field_name}不能包含换行"
+    return 1
+  fi
+
+  if [[ ! "${value}" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+    err "${field_name}仅支持字母、数字、点、下划线、波浪线和短横线"
+    return 1
+  fi
+
+  return 0
+}
+
+restore_file_or_remove() {
+  local backup_path="$1" target_path="$2"
+
+  if [[ -n "${backup_path}" && -f "${backup_path}" ]]; then
+    mv -f "${backup_path}" "${target_path}"
+  else
+    rm -f "${target_path}"
+  fi
+}
+
 # ======================== 网络工具 ========================
 get_public_ip() {
   local ip=""
@@ -66,7 +176,7 @@ get_arch() {
   local arch
   arch="$(uname -m)"
   case "${arch}" in
-    x86_64|amd64)     echo "64" ;;
+    x86_64|amd64)      echo "64" ;;
     aarch64|arm64)     echo "arm64-v8a" ;;
     armv7l|armhf)      echo "arm32-v7a" ;;
     *)                 echo "" ;;
@@ -74,15 +184,31 @@ get_arch() {
 }
 
 random_string() {
-  local len="${1:-16}"
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${len}"
+  local len="${1:-16}" value=""
+
+  while [[ ${#value} -lt ${len} ]]; do
+    value+="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${len}" || true)"
+  done
+
+  printf '%s' "${value:0:len}"
+}
+
+port_in_use() {
+  local port="$1"
+
+  if command -v ss &>/dev/null; then
+    ss -tlnu 2>/dev/null | grep -q ":${port} "
+    return $?
+  fi
+
+  return 1
 }
 
 random_port() {
   local port
   while true; do
     port=$(( RANDOM % 40000 + 20000 ))
-    if ! ss -tlnp | grep -q ":${port} "; then
+    if ! port_in_use "${port}"; then
       echo "${port}"
       return
     fi
@@ -106,9 +232,16 @@ install_self_cmd() {
   fi
 
   # 通过 bash <(curl ...) 运行，从远程下载
-  if curl -sL --max-time 15 "${SCRIPT_URL}" -o "${SCRIPT_PATH}" 2>/dev/null; then
-    chmod +x "${SCRIPT_PATH}"
-    msg "已安装快捷命令: socks"
+  local tmp_script="/tmp/socks_self_$$.sh"
+  if curl -sL --max-time 15 "${SCRIPT_URL}" -o "${tmp_script}" 2>/dev/null; then
+    if validate_script_file "${tmp_script}"; then
+      cp -f "${tmp_script}" "${SCRIPT_PATH}"
+      chmod +x "${SCRIPT_PATH}"
+      msg "已安装快捷命令: socks"
+    else
+      warn "下载的快捷命令校验失败，已跳过安装"
+    fi
+    rm -f "${tmp_script}"
   else
     warn "快捷命令安装失败，可手动运行脚本"
   fi
@@ -123,8 +256,11 @@ install_deps() {
       apt-get update -qq
       apt-get install -y -qq curl wget unzip jq >/dev/null 2>&1
       ;;
-    centos|rhel|rocky|alma|fedora)
+    centos|rhel|rocky|alma)
       yum install -y -q curl wget unzip jq >/dev/null 2>&1
+      ;;
+    fedora)
+      dnf install -y -q curl wget unzip jq >/dev/null 2>&1
       ;;
     *)
       warn "未知发行版，请确保已安装 curl wget unzip jq"
@@ -147,23 +283,65 @@ install_xray() {
   fi
 
   msg "获取 Xray 最新版本..."
-  local latest_ver
-  latest_ver=$(curl -sL --max-time 10 \
-    "https://api.github.com/repos/XTLS/Xray-core/releases/latest" \
-    | jq -r '.tag_name' 2>/dev/null || true)
+  local release_json latest_ver
+  release_json="$(curl -sL --max-time 15 "https://api.github.com/repos/XTLS/Xray-core/releases/latest" || true)"
+  latest_ver="$(jq -r '.tag_name // empty' <<< "${release_json}" 2>/dev/null || true)"
 
   if [[ -z "${latest_ver}" || "${latest_ver}" == "null" ]]; then
     err "获取 Xray 版本失败"
     return 1
   fi
 
+  local zip_name="Xray-linux-${arch}.zip"
+  local checksum_name="${zip_name}.dgst"
+  local dl_url checksum_url
+
+  dl_url="$(jq -r --arg name "${zip_name}" '.assets[]? | select(.name == $name) | .browser_download_url' <<< "${release_json}" 2>/dev/null | sed -n '1p')"
+  checksum_url="$(jq -r --arg name "${checksum_name}" '.assets[]? | select(.name == $name) | .browser_download_url' <<< "${release_json}" 2>/dev/null | sed -n '1p')"
+
+  if [[ -z "${dl_url}" ]]; then
+    err "未找到 Xray 安装包: ${zip_name}"
+    return 1
+  fi
+
+  if [[ -z "${checksum_url}" ]]; then
+    err "未找到 Xray 校验文件: ${checksum_name}"
+    return 1
+  fi
+
   msg "下载 Xray ${latest_ver} (${arch})..."
-  local dl_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${arch}.zip"
   local tmp_zip="/tmp/xray_$$.zip"
+  local tmp_checksum="/tmp/xray_$$.zip.dgst"
   local tmp_dir="/tmp/xray_$$"
 
   if ! curl -sL --max-time 120 "${dl_url}" -o "${tmp_zip}"; then
     err "下载 Xray 失败"
+    rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
+    return 1
+  fi
+
+  if ! curl -sL --max-time 30 "${checksum_url}" -o "${tmp_checksum}"; then
+    err "下载 Xray 校验文件失败"
+    rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
+    return 1
+  fi
+
+  local expected_sha actual_sha
+  expected_sha="$(extract_sha256_from_file "${tmp_checksum}" "${zip_name}")"
+  if [[ -z "${expected_sha}" ]]; then
+    err "无法从校验文件中提取 ${zip_name} 的 SHA256"
+    rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
+    return 1
+  fi
+
+  actual_sha="$(sha256_file "${tmp_zip}")" || {
+    rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
+    return 1
+  }
+
+  if [[ "${actual_sha}" != "${expected_sha}" ]]; then
+    err "Xray 安装包校验失败"
+    rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
     return 1
   fi
 
@@ -172,59 +350,100 @@ install_xray() {
   cp -f "${tmp_dir}/xray" "${XRAY_BIN}"
   chmod +x "${XRAY_BIN}"
 
-  rm -rf "${tmp_zip}" "${tmp_dir}"
+  rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
   msg "Xray ${latest_ver} 安装完成"
 }
 
 # ======================== 配置生成 ========================
+write_user_data() {
+  local port="$1" user="$2" pass="$3"
+  local data_tmp="${DATA_FILE}.tmp.$$"
+
+  if ! jq -n \
+    --argjson port "${port}" \
+    --arg user "${user}" \
+    --arg pass "${pass}" \
+    '{port:$port,user:$user,pass:$pass}' > "${data_tmp}"; then
+    rm -f "${data_tmp}"
+    err "写入用户数据失败"
+    return 1
+  fi
+
+  mv -f "${data_tmp}" "${DATA_FILE}"
+}
+
 generate_config() {
   local port="$1" user="$2" pass="$3"
+  local config_tmp="${CONFIG_FILE}.tmp.$$"
 
   mkdir -p "${INSTALL_DIR}" "${LOG_DIR}"
 
-  cat > "${CONFIG_FILE}" <<EOF
-{
-  "log": {
-    "access": "${LOG_DIR}/access.log",
-    "error": "${LOG_DIR}/error.log",
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "socks-in",
-      "port": ${port},
-      "listen": "0.0.0.0",
-      "protocol": "socks",
-      "settings": {
-        "auth": "password",
-        "accounts": [
-          {
-            "user": "${user}",
-            "pass": "${pass}"
+  if ! jq -n \
+    --arg access "${LOG_DIR}/access.log" \
+    --arg error_log "${LOG_DIR}/error.log" \
+    --argjson port "${port}" \
+    --arg user "${user}" \
+    --arg pass "${pass}" \
+    '{
+      log: {
+        access: $access,
+        error: $error_log,
+        loglevel: "warning"
+      },
+      inbounds: [
+        {
+          tag: "socks-in",
+          port: $port,
+          listen: "0.0.0.0",
+          protocol: "socks",
+          settings: {
+            auth: "password",
+            accounts: [
+              {
+                user: $user,
+                pass: $pass
+              }
+            ],
+            udp: true
           }
-        ],
-        "udp": true
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {}
-    }
-  ]
-}
-EOF
+        }
+      ],
+      outbounds: [
+        {
+          tag: "direct",
+          protocol: "freedom",
+          settings: {}
+        }
+      ]
+    }' > "${config_tmp}"; then
+    rm -f "${config_tmp}"
+    err "生成配置文件失败"
+    return 1
+  fi
 
-  # 保存用户数据（供后续读取）
-  cat > "${DATA_FILE}" <<EOF
-PORT=${port}
-USER=${user}
-PASS=${pass}
-EOF
+  mv -f "${config_tmp}" "${CONFIG_FILE}"
+
+  if ! write_user_data "${port}" "${user}" "${pass}"; then
+    return 1
+  fi
 
   msg "配置文件已生成: ${CONFIG_FILE}"
+}
+
+validate_xray_config() {
+  if [[ ! -x "${XRAY_BIN}" ]]; then
+    err "未找到 Xray 可执行文件: ${XRAY_BIN}"
+    return 1
+  fi
+
+  local output=""
+  if ! output="$("${XRAY_BIN}" run -test -config "${CONFIG_FILE}" 2>&1)"; then
+    err "Xray 配置校验失败"
+    [[ -n "${output}" ]] && echo "${output}"
+    return 1
+  fi
+
+  return 0
 }
 
 # ======================== systemd 服务 ========================
@@ -290,8 +509,8 @@ close_firewall() {
   [[ -z "${port}" ]] && return 0
 
   if command -v ufw &>/dev/null; then
-    ufw delete allow "${port}/tcp" 2>/dev/null || true
-    ufw delete allow "${port}/udp" 2>/dev/null || true
+    ufw --force delete allow "${port}/tcp" 2>/dev/null || true
+    ufw --force delete allow "${port}/udp" 2>/dev/null || true
   fi
 
   if command -v firewall-cmd &>/dev/null; then
@@ -308,17 +527,27 @@ close_firewall() {
 
 # ======================== 读取现有配置 ========================
 load_user_data() {
-  if [[ -f "${DATA_FILE}" ]]; then
-    source "${DATA_FILE}"
-    CURRENT_PORT="${PORT:-}"
-    CURRENT_USER="${USER:-}"
-    CURRENT_PASS="${PASS:-}"
-    return 0
-  fi
   CURRENT_PORT=""
   CURRENT_USER=""
   CURRENT_PASS=""
-  return 1
+
+  if [[ ! -f "${DATA_FILE}" ]]; then
+    return 1
+  fi
+
+  CURRENT_PORT="$(jq -r '.port // empty' "${DATA_FILE}" 2>/dev/null || true)"
+  CURRENT_USER="$(jq -r '.user // empty' "${DATA_FILE}" 2>/dev/null || true)"
+  CURRENT_PASS="$(jq -r '.pass // empty' "${DATA_FILE}" 2>/dev/null || true)"
+
+  if [[ -z "${CURRENT_PORT}" || -z "${CURRENT_USER}" || -z "${CURRENT_PASS}" ]]; then
+    warn "用户数据文件损坏或缺少必要字段: ${DATA_FILE}"
+    CURRENT_PORT=""
+    CURRENT_USER=""
+    CURRENT_PASS=""
+    return 1
+  fi
+
+  return 0
 }
 
 # ======================== 核心功能 ========================
@@ -348,14 +577,35 @@ install_proxy() {
   read -rp "设置密码 (留空随机): " input_pass
   local pass="${input_pass:-$(random_string 16)}"
 
-  generate_config "${port}" "${user}" "${pass}"
-  create_service
-  open_firewall "${port}"
+  if ! validate_port "${port}" \
+    || ! validate_credential "用户名" "${user}" \
+    || ! validate_credential "密码" "${pass}"; then
+    press_any_key
+    return
+  fi
 
-  systemctl restart "${SERVICE_NAME}"
+  if ! generate_config "${port}" "${user}" "${pass}"; then
+    press_any_key
+    return
+  fi
+
+  if ! validate_xray_config; then
+    press_any_key
+    return
+  fi
+
+  create_service
+
+  if ! systemctl restart "${SERVICE_NAME}"; then
+    err "服务启动失败，请查看日志: journalctl -u ${SERVICE_NAME}"
+    press_any_key
+    return
+  fi
+
   sleep 1
 
   if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    open_firewall "${port}"
     msg "✅ SOCKS5 代理安装并启动成功！"
     echo ""
     show_connection_info "${port}" "${user}" "${pass}"
@@ -477,22 +727,62 @@ modify_config() {
   local user="${new_user:-${CURRENT_USER}}"
   local pass="${new_pass:-${CURRENT_PASS}}"
 
-  # 端口变更时处理防火墙
-  if [[ "${port}" != "${CURRENT_PORT}" ]]; then
-    close_firewall "${CURRENT_PORT}"
-    open_firewall "${port}"
+  if ! validate_port "${port}" \
+    || ! validate_credential "用户名" "${user}" \
+    || ! validate_credential "密码" "${pass}"; then
+    press_any_key
+    return
   fi
 
-  generate_config "${port}" "${user}" "${pass}"
-  systemctl restart "${SERVICE_NAME}" 2>/dev/null
+  local config_backup=""
+  local data_backup=""
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    config_backup="${CONFIG_FILE}.bak.$$"
+    cp -f "${CONFIG_FILE}" "${config_backup}"
+  fi
+  if [[ -f "${DATA_FILE}" ]]; then
+    data_backup="${DATA_FILE}.bak.$$"
+    cp -f "${DATA_FILE}" "${data_backup}"
+  fi
+
+  if ! generate_config "${port}" "${user}" "${pass}"; then
+    restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+    restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+    press_any_key
+    return
+  fi
+
+  if ! validate_xray_config; then
+    restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+    restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+    press_any_key
+    return
+  fi
+
+  if ! systemctl restart "${SERVICE_NAME}" 2>/dev/null; then
+    restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+    restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+    systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+    err "重启失败，已恢复旧配置"
+    press_any_key
+    return
+  fi
 
   sleep 1
   if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    if [[ "${port}" != "${CURRENT_PORT}" ]]; then
+      open_firewall "${port}"
+      close_firewall "${CURRENT_PORT}"
+    fi
+    rm -f "${config_backup}" "${data_backup}"
     msg "✅ 配置已更新并重启成功"
     echo ""
     show_connection_info "${port}" "${user}" "${pass}"
   else
-    err "重启失败，请检查日志"
+    restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+    restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+    systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+    err "重启失败，已恢复旧配置"
   fi
 
   press_any_key
@@ -505,8 +795,9 @@ update_script() {
   local tmp="/tmp/socks_update_$$.sh"
 
   if curl -sL --max-time 15 "${SCRIPT_URL}?t=$(date +%s)" -o "${tmp}" 2>/dev/null; then
-    if [[ -s "${tmp}" ]] && grep -q "SCRIPT_URL" "${tmp}"; then
-      cp -f "${tmp}" "${SCRIPT_PATH}" && chmod +x "${SCRIPT_PATH}"
+    if validate_script_file "${tmp}"; then
+      cp -f "${tmp}" "${SCRIPT_PATH}"
+      chmod +x "${SCRIPT_PATH}"
       rm -f "${tmp}"
       msg "✅ 更新成功，即将重新加载..."
       sleep 1
