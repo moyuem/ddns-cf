@@ -72,9 +72,25 @@ extract_sha256_from_file() {
   local checksum_file="$1" target_name="$2"
 
   awk -v target="${target_name}" '
+    BEGIN {
+      sha_re = "^[A-Fa-f0-9]{64}$"
+      sha_label_re = "^(SHA2-256|SHA256|SHA-256)="
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+    }
+    line ~ sha_label_re {
+      value = line
+      sub(/^[^=]+=[[:space:]]*/, "", value)
+      if (value ~ sha_re) {
+        print tolower(value)
+        exit
+      }
+    }
     index($0, target) {
       for (i = 1; i <= NF; i++) {
-        if ($i ~ /^[A-Fa-f0-9]{64}$/) {
+        if ($i ~ sha_re) {
           print tolower($i)
           exit
         }
