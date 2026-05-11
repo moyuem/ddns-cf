@@ -68,35 +68,51 @@ sha256_file() {
   return 1
 }
 
+normalize_sha256() {
+  local value="${1,,}"
+
+  value="${value//$'\r'/}"
+  value="${value//$'\n'/}"
+  value="${value//[[:space:]]/}"
+  value="${value#sha256:}"
+  value="${value#sha256=}"
+  value="${value#sha-256=}"
+  value="${value#sha2-256=}"
+
+  if [[ "${value}" =~ ^[0-9a-f]{64}$ ]]; then
+    printf '%s\n' "${value}"
+  fi
+}
+
+is_sha256() {
+  [[ "${1,,}" =~ ^[0-9a-f]{64}$ ]]
+}
+
 extract_sha256_from_file() {
   local checksum_file="$1" target_name="$2"
+  local target_lower="${target_name,,}"
+  local line lower normalized candidates token
 
-  awk -v target="${target_name}" '
-    BEGIN {
-      sha_re = "^[A-Fa-f0-9]{64}$"
-      sha_label_re = "^(SHA2-256|SHA256|SHA-256)="
-    }
-    {
-      line = $0
-      sub(/\r$/, "", line)
-    }
-    line ~ sha_label_re {
-      value = line
-      sub(/^[^=]+=[[:space:]]*/, "", value)
-      if (value ~ sha_re) {
-        print tolower(value)
-        exit
-      }
-    }
-    index($0, target) {
-      for (i = 1; i <= NF; i++) {
-        if ($i ~ sha_re) {
-          print tolower($i)
-          exit
-        }
-      }
-    }
-  ' "${checksum_file}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    lower="${line,,}"
+
+    normalized="$(normalize_sha256 "${lower}")"
+    if [[ -n "${normalized}" ]]; then
+      printf '%s\n' "${normalized}"
+      return 0
+    fi
+
+    if [[ "${lower}" == *"${target_lower}"* || "${lower}" == sha* ]]; then
+      candidates="$(printf '%s' "${lower}" | tr -c '0-9a-f' ' ')"
+      for token in ${candidates}; do
+        if is_sha256 "${token}"; then
+          printf '%s\n' "${token}"
+          return 0
+        fi
+      done
+    fi
+  done < "${checksum_file}"
 }
 
 validate_script_file() {
@@ -310,17 +326,18 @@ install_xray() {
 
   local zip_name="Xray-linux-${arch}.zip"
   local checksum_name="${zip_name}.dgst"
-  local dl_url checksum_url
+  local dl_url checksum_url api_digest
 
   dl_url="$(jq -r --arg name "${zip_name}" '.assets[]? | select(.name == $name) | .browser_download_url' <<< "${release_json}" 2>/dev/null | sed -n '1p')"
   checksum_url="$(jq -r --arg name "${checksum_name}" '.assets[]? | select(.name == $name) | .browser_download_url' <<< "${release_json}" 2>/dev/null | sed -n '1p')"
+  api_digest="$(jq -r --arg name "${zip_name}" '.assets[]? | select(.name == $name) | .digest // empty' <<< "${release_json}" 2>/dev/null | sed -n '1p')"
 
   if [[ -z "${dl_url}" ]]; then
     err "未找到 Xray 安装包: ${zip_name}"
     return 1
   fi
 
-  if [[ -z "${checksum_url}" ]]; then
+  if [[ -z "${checksum_url}" && -z "$(normalize_sha256 "${api_digest}")" ]]; then
     err "未找到 Xray 校验文件: ${checksum_name}"
     return 1
   fi
@@ -336,15 +353,17 @@ install_xray() {
     return 1
   fi
 
-  if ! curl -sL --max-time 30 "${checksum_url}" -o "${tmp_checksum}"; then
+  if [[ -z "$(normalize_sha256 "${api_digest}")" ]] && ! curl -sL --max-time 30 "${checksum_url}" -o "${tmp_checksum}"; then
     err "下载 Xray 校验文件失败"
     rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
     return 1
   fi
 
   local expected_sha actual_sha
-  expected_sha="$(extract_sha256_from_file "${tmp_checksum}" "${zip_name}")"
+  expected_sha="$(normalize_sha256 "${api_digest}")"
+  [[ -z "${expected_sha}" ]] && expected_sha="$(extract_sha256_from_file "${tmp_checksum}" "${zip_name}")"
   if [[ -z "${expected_sha}" ]]; then
+    [[ -s "${tmp_checksum}" ]] && sed -n '1,5p' "${tmp_checksum}" 2>/dev/null || true
     err "无法从校验文件中提取 ${zip_name} 的 SHA256"
     rm -rf "${tmp_zip}" "${tmp_checksum}" "${tmp_dir}"
     return 1
