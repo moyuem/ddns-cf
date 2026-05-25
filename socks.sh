@@ -269,6 +269,47 @@ format_bytes() {
   '
 }
 
+format_duration() {
+  local seconds="${1:-0}"
+  local days hours minutes
+
+  if ! [[ "${seconds}" =~ ^[0-9]+$ ]]; then
+    seconds=0
+  fi
+
+  days=$(( seconds / 86400 ))
+  seconds=$(( seconds % 86400 ))
+  hours=$(( seconds / 3600 ))
+  seconds=$(( seconds % 3600 ))
+  minutes=$(( seconds / 60 ))
+  seconds=$(( seconds % 60 ))
+
+  if (( days > 0 )); then
+    printf '%d天 %02d小时 %02d分钟 %02d秒' "${days}" "${hours}" "${minutes}" "${seconds}"
+  elif (( hours > 0 )); then
+    printf '%d小时 %02d分钟 %02d秒' "${hours}" "${minutes}" "${seconds}"
+  elif (( minutes > 0 )); then
+    printf '%d分钟 %02d秒' "${minutes}" "${seconds}"
+  else
+    printf '%d秒' "${seconds}"
+  fi
+}
+
+get_service_uptime_seconds() {
+  local pid uptime
+
+  pid="$(systemctl show "${SERVICE_NAME}" --property=MainPID --value 2>/dev/null || true)"
+  if [[ "${pid}" =~ ^[0-9]+$ && "${pid}" -gt 0 ]]; then
+    uptime="$(ps -o etimes= -p "${pid}" 2>/dev/null | awk '{print $1; exit}')"
+    if [[ "${uptime}" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "${uptime}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 # ======================== 快捷命令安装 ========================
 install_self_cmd() {
   local src=""
@@ -988,12 +1029,18 @@ show_traffic_stats() {
     return
   fi
 
-  local uplink downlink total
+  local uplink downlink total uptime_seconds uptime_text
   uplink="$(stat_value_from_output "${output}" "inbound>>>socks-in>>>traffic>>>uplink")"
   downlink="$(stat_value_from_output "${output}" "inbound>>>socks-in>>>traffic>>>downlink")"
   uplink="${uplink:-0}"
   downlink="${downlink:-0}"
   total=$(( uplink + downlink ))
+  uptime_seconds="$(get_service_uptime_seconds || true)"
+  if [[ -n "${uptime_seconds}" ]]; then
+    uptime_text="$(format_duration "${uptime_seconds}")"
+  else
+    uptime_text="未知"
+  fi
 
   echo -e "${CYAN}${BOLD}"
   echo "  ╔══════════════════════════════════════════════╗"
@@ -1001,6 +1048,7 @@ show_traffic_stats() {
   echo "  ╚══════════════════════════════════════════════╝"
   echo -e "${NC}"
   echo "  统计范围: 当前服务运行期间"
+  echo "  已运行时间: ${uptime_text}"
   echo ""
   echo "  上行流量: $(format_bytes "${uplink}") (${uplink} B)"
   echo "  下行流量: $(format_bytes "${downlink}") (${downlink} B)"
