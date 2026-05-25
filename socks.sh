@@ -13,6 +13,7 @@ SCRIPT_PATH="/usr/local/bin/socks"
 INSTALL_DIR="/usr/local/etc/xray"
 CONFIG_FILE="${INSTALL_DIR}/config.json"
 XRAY_BIN="/usr/local/bin/xray"
+XRAY_API_PORT="10085"
 SERVICE_NAME="xray-socks"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 LOG_DIR="/var/log/${SERVICE_NAME}"
@@ -247,6 +248,27 @@ random_port() {
   done
 }
 
+format_bytes() {
+  local bytes="${1:-0}"
+
+  awk -v bytes="${bytes}" '
+    BEGIN {
+      split("B KB MB GB TB PB", units, " ")
+      value = bytes + 0
+      idx = 1
+      while (value >= 1024 && idx < 6) {
+        value = value / 1024
+        idx++
+      }
+      if (idx == 1) {
+        printf "%.0f %s", value, units[idx]
+      } else {
+        printf "%.2f %s", value, units[idx]
+      }
+    }
+  '
+}
+
 # ======================== 快捷命令安装 ========================
 install_self_cmd() {
   local src=""
@@ -417,6 +439,7 @@ generate_config() {
     --arg access "${LOG_DIR}/access.log" \
     --arg error_log "${LOG_DIR}/error.log" \
     --argjson port "${port}" \
+    --argjson api_port "${XRAY_API_PORT}" \
     --arg user "${user}" \
     --arg pass "${pass}" \
     '{
@@ -425,6 +448,19 @@ generate_config() {
         error: $error_log,
         loglevel: "warning"
       },
+      api: {
+        tag: "api",
+        services: [
+          "StatsService"
+        ]
+      },
+      policy: {
+        system: {
+          statsInboundUplink: true,
+          statsInboundDownlink: true
+        }
+      },
+      stats: {},
       inbounds: [
         {
           tag: "socks-in",
@@ -441,6 +477,15 @@ generate_config() {
             ],
             udp: true
           }
+        },
+        {
+          tag: "api",
+          port: $api_port,
+          listen: "127.0.0.1",
+          protocol: "dokodemo-door",
+          settings: {
+            rewriteAddress: "127.0.0.1"
+          }
         }
       ],
       outbounds: [
@@ -448,8 +493,24 @@ generate_config() {
           tag: "direct",
           protocol: "freedom",
           settings: {}
+        },
+        {
+          tag: "api",
+          protocol: "freedom",
+          settings: {}
         }
-      ]
+      ],
+      routing: {
+        rules: [
+          {
+            type: "field",
+            inboundTag: [
+              "api"
+            ],
+            outboundTag: "api"
+          }
+        ]
+      }
     }' > "${config_tmp}"; then
     rm -f "${config_tmp}"
     err "生成配置文件失败"
@@ -739,6 +800,171 @@ show_info() {
   press_any_key
 }
 
+# ---- 流量统计 ----
+config_has_traffic_stats() {
+  [[ -f "${CONFIG_FILE}" ]] || return 1
+
+  jq -e --argjson api_port "${XRAY_API_PORT}" '
+    (.stats? | type == "object")
+    and (.api?.tag == "api")
+    and (any(.api?.services[]?; . == "StatsService"))
+    and (any(.inbounds[]?; .tag == "api" and .listen == "127.0.0.1" and .port == $api_port))
+    and (any(.routing?.rules[]?; .outboundTag == "api"))
+    and (.policy?.system?.statsInboundUplink == true)
+    and (.policy?.system?.statsInboundDownlink == true)
+  ' "${CONFIG_FILE}" >/dev/null 2>&1
+}
+
+enable_traffic_stats_for_existing_config() {
+  if config_has_traffic_stats; then
+    return 0
+  fi
+
+  warn "当前配置未启用流量统计，需要更新配置并重启服务。"
+  if ! load_user_data; then
+    warn "无法读取现有端口、用户名和密码，请先重新安装或修改配置。"
+    return 1
+  fi
+
+  read -rp "是否立即启用流量统计？[y/N]: " yn
+  [[ "${yn,,}" == "y" ]] || return 1
+
+  local config_backup=""
+  local data_backup=""
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    config_backup="${CONFIG_FILE}.bak.$$"
+    cp -f "${CONFIG_FILE}" "${config_backup}"
+  fi
+  if [[ -f "${DATA_FILE}" ]]; then
+    data_backup="${DATA_FILE}.bak.$$"
+    cp -f "${DATA_FILE}" "${data_backup}"
+  fi
+
+  if ! generate_config "${CURRENT_PORT}" "${CURRENT_USER}" "${CURRENT_PASS}"; then
+    restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+    restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+    return 1
+  fi
+
+  if ! validate_xray_config; then
+    restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+    restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+    return 1
+  fi
+
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    if ! systemctl restart "${SERVICE_NAME}" 2>/dev/null; then
+      restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+      restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+      systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+      err "启用流量统计失败，已恢复原配置。"
+      return 1
+    fi
+
+    sleep 1
+    if ! systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      restore_file_or_remove "${config_backup}" "${CONFIG_FILE}"
+      restore_file_or_remove "${data_backup}" "${DATA_FILE}"
+      systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+      err "启用流量统计后服务未能正常运行，已恢复原配置。"
+      return 1
+    fi
+  fi
+
+  rm -f "${config_backup}" "${data_backup}"
+  msg "流量统计已启用"
+  return 0
+}
+
+query_traffic_stats() {
+  "${XRAY_BIN}" api statsquery \
+    --server="127.0.0.1:${XRAY_API_PORT}" 2>/dev/null
+}
+
+stat_value_from_output() {
+  local output="$1" stat_name="$2"
+  local value=""
+
+  if command -v jq &>/dev/null; then
+    value="$(jq -r --arg name "${stat_name}" '.stat[]? | select(.name == $name) | .value // empty' <<< "${output}" 2>/dev/null | sed -n '1p' || true)"
+    if [[ "${value}" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "${value}"
+      return 0
+    fi
+  fi
+
+  awk -v target="${stat_name}" '
+    function print_value(line, value) {
+      value = line
+      if (sub(/^.*"?value"?[[:space:]]*:[[:space:]]*"?/, "", value)) {
+        sub(/[^0-9].*$/, "", value)
+        if (value != "") {
+          print value + 0
+          exit
+        }
+      }
+    }
+
+    index($0, "name: \"" target "\"") || (index($0, target) && $0 ~ /"?name"?[[:space:]]*:/) {
+      found = 1
+      print_value($0)
+      next
+    }
+
+    found {
+      print_value($0)
+    }
+  ' <<< "${output}"
+}
+
+show_traffic_stats() {
+  echo ""
+
+  if [[ ! -x "${XRAY_BIN}" || ! -f "${CONFIG_FILE}" ]]; then
+    warn "未找到 Xray 配置，请先安装 SOCKS5 代理。"
+    press_any_key
+    return
+  fi
+
+  if ! enable_traffic_stats_for_existing_config; then
+    press_any_key
+    return
+  fi
+
+  if ! systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    warn "服务未运行，启动服务后才能读取流量统计。"
+    press_any_key
+    return
+  fi
+
+  local output=""
+  if ! output="$(query_traffic_stats)"; then
+    err "读取流量统计失败，请确认 Xray Stats API 正常运行。"
+    press_any_key
+    return
+  fi
+
+  local uplink downlink total
+  uplink="$(stat_value_from_output "${output}" "inbound>>>socks-in>>>traffic>>>uplink")"
+  downlink="$(stat_value_from_output "${output}" "inbound>>>socks-in>>>traffic>>>downlink")"
+  uplink="${uplink:-0}"
+  downlink="${downlink:-0}"
+  total=$(( uplink + downlink ))
+
+  echo -e "${CYAN}${BOLD}"
+  echo "  ╔══════════════════════════════════════════════╗"
+  echo "  ║              SOCKS5 流量统计                 ║"
+  echo "  ╚══════════════════════════════════════════════╝"
+  echo -e "${NC}"
+  echo "  统计范围: 当前服务运行期间"
+  echo ""
+  echo "  上行流量: $(format_bytes "${uplink}") (${uplink} B)"
+  echo "  下行流量: $(format_bytes "${downlink}") (${downlink} B)"
+  echo "  总计流量: $(format_bytes "${total}") (${total} B)"
+
+  press_any_key
+}
+
 # ---- 修改配置 ----
 modify_config() {
   echo ""
@@ -977,15 +1203,16 @@ show_menu() {
   echo -e "  ${BOLD}── 信息查看 ──────────────────────────${NC}"
   echo "  5) 查看服务状态"
   echo "  6) 查看连接信息"
+  echo "  7) 查看流量统计"
   echo ""
   echo -e "  ${BOLD}── 配置维护 ──────────────────────────${NC}"
-  echo "  7) 修改配置 (端口/用户名/密码)"
-  echo "  8) 更新脚本"
-  echo "  9) 完整卸载"
+  echo "  8) 修改配置 (端口/用户名/密码)"
+  echo "  9) 更新脚本"
+  echo "  10) 完整卸载"
   echo ""
   echo "  0) 退出"
   echo ""
-  read -rp "  请选择 [0-9]: " choice
+  read -rp "  请选择 [0-10]: " choice
 
   case "${choice}" in
     1) install_proxy   ;;
@@ -994,9 +1221,10 @@ show_menu() {
     4) restart_service ;;
     5) show_status     ;;
     6) show_info       ;;
-    7) modify_config   ;;
-    8) update_script   ;;
-    9) full_uninstall  ;;
+    7) show_traffic_stats ;;
+    8) modify_config   ;;
+    9) update_script   ;;
+    10) full_uninstall ;;
     0) echo ""; msg "再见！"; exit 0 ;;
     *) warn "无效选项，请重新选择"; sleep 1 ;;
   esac
