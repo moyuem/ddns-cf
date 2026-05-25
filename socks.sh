@@ -622,13 +622,56 @@ close_firewall() {
 }
 
 # ======================== 读取现有配置 ========================
+load_user_data_from_config() {
+  [[ -f "${CONFIG_FILE}" ]] || return 1
+
+  CURRENT_PORT="$(jq -r '
+    .inbounds[]?
+    | select(.protocol == "socks" and (.tag == "socks-in" or (.settings.accounts | type == "array")))
+    | .port // empty
+  ' "${CONFIG_FILE}" 2>/dev/null | sed -n '1p' || true)"
+  CURRENT_USER="$(jq -r '
+    .inbounds[]?
+    | select(.protocol == "socks" and (.tag == "socks-in" or (.settings.accounts | type == "array")))
+    | .settings.accounts[0].user // empty
+  ' "${CONFIG_FILE}" 2>/dev/null | sed -n '1p' || true)"
+  CURRENT_PASS="$(jq -r '
+    .inbounds[]?
+    | select(.protocol == "socks" and (.tag == "socks-in" or (.settings.accounts | type == "array")))
+    | .settings.accounts[0].pass // empty
+  ' "${CONFIG_FILE}" 2>/dev/null | sed -n '1p' || true)"
+
+  if [[ -z "${CURRENT_PORT}" || -z "${CURRENT_USER}" || -z "${CURRENT_PASS}" ]]; then
+    CURRENT_PORT=""
+    CURRENT_USER=""
+    CURRENT_PASS=""
+    return 1
+  fi
+
+  if ! [[ "${CURRENT_PORT}" =~ ^[0-9]+$ ]]; then
+    CURRENT_PORT=""
+    CURRENT_USER=""
+    CURRENT_PASS=""
+    return 1
+  fi
+
+  if write_user_data "${CURRENT_PORT}" "${CURRENT_USER}" "${CURRENT_PASS}" 2>/dev/null; then
+    msg "已从 ${CONFIG_FILE} 恢复用户数据记录"
+  else
+    warn "已从配置文件读取连接信息，但无法重建用户数据文件"
+  fi
+
+  return 0
+}
+
 load_user_data() {
   CURRENT_PORT=""
   CURRENT_USER=""
   CURRENT_PASS=""
 
   if [[ ! -f "${DATA_FILE}" ]]; then
-    return 1
+    load_user_data_from_config
+    return $?
   fi
 
   CURRENT_PORT="$(jq -r '.port // empty' "${DATA_FILE}" 2>/dev/null || true)"
@@ -640,7 +683,8 @@ load_user_data() {
     CURRENT_PORT=""
     CURRENT_USER=""
     CURRENT_PASS=""
-    return 1
+    load_user_data_from_config
+    return $?
   fi
 
   return 0
@@ -1226,7 +1270,7 @@ show_menu() {
     9) update_script   ;;
     10) full_uninstall ;;
     0) echo ""; msg "再见！"; exit 0 ;;
-    *) warn "无效选项，请重新选择"; sleep 1 ;;
+    *) warn "无效选项，已退出管理面板"; exit 1 ;;
   esac
 }
 
