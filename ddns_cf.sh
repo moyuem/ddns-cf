@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+DDNS_CF_SCRIPT_ID="moyuem/ddns-cf"
+SCRIPT_URL="https://raw.githubusercontent.com/moyuem/ddns-cf/main/ddns_cf.sh"
 CONFIG_FILE="${DDNS_CF_CONFIG:-$HOME/.ddns_cf.conf}"
 LOG_FILE="${DDNS_CF_LOG:-$HOME/ddns_cf.log}"
+INSTALLED_SCRIPT_PATH=""
 ORIGINAL_ARGC=$#
 FORCE=false
 SETUP=false
 RUN_ONLY=false
 MENU=false
+REPAIR=false
 DID_SETUP=false
 
 usage() {
@@ -18,6 +22,7 @@ usage() {
   --setup    进入交互式配置，并自动安装或更新定时任务
   --run      只运行 DDNS 更新，不进入交互式配置
   --menu     打开菜单页
+  --repair   修复已安装的 ddns 命令和定时任务，不修改现有配置
   --force    即使公网 IP 没有变化也强制更新 DNS
   -h,--help  显示帮助
 
@@ -36,6 +41,9 @@ while [ $# -gt 0 ]; do
             ;;
         --menu)
             MENU=true
+            ;;
+        --repair)
+            REPAIR=true
             ;;
         --force)
             FORCE=true
@@ -59,7 +67,7 @@ fi
 
 script_path() {
     local source_path dir base
-    source_path="${BASH_SOURCE[0]}"
+    source_path="${BASH_SOURCE[0]:-}"
 
     if command -v realpath >/dev/null 2>&1; then
         realpath "$source_path"
@@ -69,6 +77,21 @@ script_path() {
     dir=$(cd "$(dirname "$source_path")" && pwd)
     base=$(basename "$source_path")
     printf '%s/%s\n' "$dir" "$base"
+}
+
+is_regular_script() {
+    [ -n "${BASH_SOURCE[0]:-}" ] \
+        && [ -f "${BASH_SOURCE[0]}" ] \
+        && [ -r "${BASH_SOURCE[0]}" ]
+}
+
+is_managed_ddns_target() {
+    local file
+    file="$1"
+    [ -r "$file" ] || return 1
+
+    grep -q 'ddns_cf.sh auto schedule' "$file" \
+        && grep -q 'CFZONE_NAME=' "$file"
 }
 
 prompt_required() {
@@ -217,7 +240,15 @@ save_config() {
 
 cron_command() {
     local script
-    script=$(script_path)
+    script="${INSTALLED_SCRIPT_PATH:-}"
+    if [ -z "$script" ]; then
+        script=$(script_path)
+    fi
+
+    if [ ! -f "$script" ]; then
+        echo "无法为定时任务找到持久化脚本，请先安装 ddns 快捷命令。" >&2
+        return 1
+    fi
     printf 'bash %q --run >> %q 2>&1' "$script" "$LOG_FILE"
 }
 
@@ -267,8 +298,8 @@ remove_cron() {
 }
 
 install_ddns_command() {
-    local script install_dir target owner_id replace_existing
-    script=$(script_path)
+    local source_path install_dir target owner_id replace_existing tmp
+    source_path="${BASH_SOURCE[0]:-}"
     owner_id="${EUID:-$(id -u)}"
 
     if [ "$owner_id" -eq 0 ]; then
@@ -278,24 +309,56 @@ install_ddns_command() {
     fi
     target="$install_dir/ddns"
 
-    if [ -e "$target" ] && [ "$(readlink "$target" 2>/dev/null || true)" != "$script" ]; then
-        prompt_yes_no replace_existing "$target 已存在，是否覆盖为本脚本的 ddns 菜单入口" false
-        if [ "$replace_existing" != true ]; then
-            echo "已跳过 ddns 快捷命令安装。"
-            return 0
+    mkdir -p "$install_dir"
+    tmp=$(mktemp "$install_dir/.ddns.XXXXXX")
+
+    # README 推荐使用 bash <(curl ...)，此时 BASH_SOURCE 是随进程消失的
+    # /dev/fd 路径，不能创建软链接。下载或复制成真正的可执行文件。
+    if is_regular_script; then
+        cp -- "$source_path" "$tmp"
+    else
+        if ! command -v curl >/dev/null 2>&1; then
+            echo "未找到 curl，无法从临时脚本安装 ddns 快捷命令。"
+            rm -f -- "$tmp"
+            return 1
+        fi
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 \
+            "${SCRIPT_URL}?t=$(date +%s)" -o "$tmp"; then
+            echo "下载 ddns_cf.sh 失败。"
+            rm -f -- "$tmp"
+            return 1
         fi
     fi
 
-    mkdir -p "$install_dir"
-    chmod +x "$script" 2>/dev/null || true
+    if ! grep -q "DDNS_CF_SCRIPT_ID=\"$DDNS_CF_SCRIPT_ID\"" "$tmp"; then
+        echo "下载或复制的文件不是有效的 ddns_cf.sh，已取消安装。"
+        rm -f -- "$tmp"
+        return 1
+    fi
 
-    if ln -sf "$script" "$target"; then
+    if [ -e "$target" ] && ! cmp -s "$tmp" "$target" \
+        && ! grep -q "DDNS_CF_SCRIPT_ID=\"$DDNS_CF_SCRIPT_ID\"" "$target" 2>/dev/null \
+        && ! is_managed_ddns_target "$target"; then
+        prompt_yes_no replace_existing "$target 已存在，是否覆盖为本脚本的 ddns 菜单入口" false
+        if [ "$replace_existing" != true ]; then
+            echo "已跳过 ddns 快捷命令安装。"
+            rm -f -- "$tmp"
+            return 1
+        fi
+    fi
+
+    chmod 0755 "$tmp"
+    if mv -f -- "$tmp" "$target"; then
+        INSTALLED_SCRIPT_PATH="$target"
         echo "ddns 快捷命令已安装: $target"
         if [[ ":$PATH:" != *":$install_dir:"* ]]; then
-            echo "提示: $install_dir 不在当前 PATH 中，重新登录后若仍无法输入 ddns，请把它加入 PATH。"
+            echo "提示: $install_dir 不在当前 PATH 中。当前终端可运行: $target"
+            echo "重新登录后 Debian 通常会自动把该目录加入 PATH；否则请将它加入 PATH。"
         fi
     else
         echo "ddns 快捷命令安装失败，请检查 $install_dir 是否可写。"
+        rm -f -- "$tmp"
+        return 1
     fi
 }
 
@@ -431,7 +494,7 @@ EOF
                 pause_menu
                 ;;
             9)
-                install_ddns_command
+                install_ddns_command || true
                 pause_menu
                 ;;
             0)
@@ -476,8 +539,14 @@ interactive_setup() {
 
     save_config
 
+    local command_installed=true
+    if ! install_ddns_command; then
+        command_installed=false
+        echo "ddns 快捷命令安装失败；不会安装指向临时脚本的定时任务。"
+    fi
+
     if [ "$SCHEDULE_ENABLED" = true ]; then
-        if ! install_cron "$SCHEDULE_MINUTES"; then
+        if [ "$command_installed" != true ] || ! install_cron "$SCHEDULE_MINUTES"; then
             echo "定时任务未安装，本次 DDNS 更新仍会继续。"
         fi
     else
@@ -488,7 +557,35 @@ interactive_setup() {
         send_telegram_test
     fi
 
-    install_ddns_command
+}
+
+repair_installation() {
+    local minutes
+
+    echo "正在修复 ddns 命令和定时任务，不会修改现有 DDNS 配置。"
+    if ! install_ddns_command; then
+        echo "ddns 命令修复失败。"
+        return 1
+    fi
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "未找到配置文件 $CONFIG_FILE；ddns 命令已修复，请运行 ddns 完成配置。"
+        return 0
+    fi
+
+    load_config
+    if [ "${SCHEDULE_ENABLED:-false}" = true ]; then
+        minutes="${SCHEDULE_MINUTES:-2}"
+        if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -lt 1 ] || [ "$minutes" -gt 59 ]; then
+            echo "配置中的定时间隔无效: $minutes（应为 1-59 分钟）。"
+            return 1
+        fi
+        install_cron "$minutes"
+    else
+        remove_cron
+    fi
+
+    echo "修复完成。现在可以运行: ${INSTALLED_SCRIPT_PATH:-ddns}"
 }
 
 require_config() {
@@ -538,7 +635,8 @@ send_telegram_message() {
         return 1
     fi
 
-    curl -fsS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+    curl -fsS --connect-timeout 10 --max-time 30 \
+        -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
         -d chat_id="$TG_CHAT_ID" \
         --data-urlencode "text=$message" \
         -d parse_mode="HTML" >/dev/null
@@ -604,7 +702,12 @@ EOF
 }
 
 normalize_record_name() {
-    if [[ "$CFRECORD_NAME" != *".$CFZONE_NAME" ]]; then
+    CFZONE_NAME="${CFZONE_NAME%.}"
+    CFRECORD_NAME="${CFRECORD_NAME%.}"
+
+    if [ "$CFRECORD_NAME" = "@" ] || [ "$CFRECORD_NAME" = "$CFZONE_NAME" ]; then
+        CFRECORD_NAME="$CFZONE_NAME"
+    elif [[ "${CFRECORD_NAME,,}" != *."${CFZONE_NAME,,}" ]]; then
         CFRECORD_NAME="$CFRECORD_NAME.$CFZONE_NAME"
         echo "解析记录已补全为 FQDN: $CFRECORD_NAME"
     fi
@@ -617,7 +720,23 @@ get_wan_ip() {
         wan_ip_site="https://ipv6.icanhazip.com"
     fi
 
-    curl -fsS "$wan_ip_site" | tr -d '[:space:]'
+    curl -fsS --connect-timeout 10 --max-time 30 "$wan_ip_site" | tr -d '[:space:]'
+}
+
+valid_wan_ip() {
+    local ip octet
+    local -a octets
+    ip="$1"
+
+    if [ "$CFRECORD_TYPE" = "A" ]; then
+        [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+        IFS=. read -r -a octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            [ "$octet" -le 255 ] || return 1
+        done
+    else
+        [[ "$ip" == *:* ]] && [[ "$ip" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+    fi
 }
 
 send_current_ddns_info() {
@@ -635,8 +754,12 @@ send_current_ddns_info() {
         echo "获取当前公网 IP 失败，未发送 Telegram 信息。"
         return 1
     fi
+    if ! valid_wan_ip "$current_ip"; then
+        echo "公网 IP 服务返回了无效的 $CFRECORD_TYPE 地址，未发送 Telegram 信息。"
+        return 1
+    fi
 
-    wan_ip_file="$HOME/.cf-wan_ip_$CFRECORD_NAME.txt"
+    wan_ip_file="$HOME/.cf-wan_ip_${CFRECORD_TYPE}_$CFRECORD_NAME.txt"
     cached_ip="无"
     if [ -f "$wan_ip_file" ]; then
         cached_ip=$(cat "$wan_ip_file")
@@ -679,13 +802,25 @@ EOF
 update_dns() {
     normalize_record_name
 
-    WAN_IP=$(get_wan_ip)
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "未找到 curl，请先安装: apt install curl"
+        exit 1
+    fi
+
+    if ! WAN_IP=$(get_wan_ip); then
+        echo "获取公网 IP 失败，请检查网络连接。"
+        exit 1
+    fi
     if [ -z "$WAN_IP" ]; then
         echo "获取公网 IP 失败。"
         exit 1
     fi
+    if ! valid_wan_ip "$WAN_IP"; then
+        echo "公网 IP 服务返回了无效的 $CFRECORD_TYPE 地址: $WAN_IP"
+        exit 1
+    fi
 
-    WAN_IP_FILE="$HOME/.cf-wan_ip_$CFRECORD_NAME.txt"
+    WAN_IP_FILE="$HOME/.cf-wan_ip_${CFRECORD_TYPE}_$CFRECORD_NAME.txt"
     OLD_WAN_IP=""
     if [ -f "$WAN_IP_FILE" ]; then
         OLD_WAN_IP=$(cat "$WAN_IP_FILE")
@@ -701,14 +836,17 @@ update_dns() {
     local id_file zone_response record_response response
     id_file="$HOME/.cf-id_$CFRECORD_NAME.txt"
 
-    if [ -f "$id_file" ] && [ "$(wc -l < "$id_file")" -eq 4 ] \
+    if [ -f "$id_file" ] && [ "$(wc -l < "$id_file")" -eq 5 ] \
         && [ "$(sed -n '3p' "$id_file")" = "$CFZONE_NAME" ] \
-        && [ "$(sed -n '4p' "$id_file")" = "$CFRECORD_NAME" ]; then
+        && [ "$(sed -n '4p' "$id_file")" = "$CFRECORD_NAME" ] \
+        && [ "$(sed -n '5p' "$id_file")" = "$CFRECORD_TYPE" ]; then
         CFZONE_ID=$(sed -n '1p' "$id_file")
         CFRECORD_ID=$(sed -n '2p' "$id_file")
     else
         echo "正在获取 Cloudflare Zone ID 和 Record ID ..."
-        zone_response=$(curl -fsS -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
+        zone_response=$(curl -fsS --connect-timeout 10 --max-time 30 \
+            -G "https://api.cloudflare.com/client/v4/zones" \
+            --data-urlencode "name=$CFZONE_NAME" \
             -H "X-Auth-Email: $CFUSER" \
             -H "X-Auth-Key: $CFKEY" \
             -H "Content-Type: application/json")
@@ -720,7 +858,10 @@ update_dns() {
             exit 1
         fi
 
-        record_response=$(curl -fsS -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?type=$CFRECORD_TYPE&name=$CFRECORD_NAME" \
+        record_response=$(curl -fsS --connect-timeout 10 --max-time 30 \
+            -G "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records" \
+            --data-urlencode "type=$CFRECORD_TYPE" \
+            --data-urlencode "name=$CFRECORD_NAME" \
             -H "X-Auth-Email: $CFUSER" \
             -H "X-Auth-Key: $CFKEY" \
             -H "Content-Type: application/json")
@@ -737,11 +878,14 @@ update_dns() {
             echo "$CFRECORD_ID"
             echo "$CFZONE_NAME"
             echo "$CFRECORD_NAME"
+            echo "$CFRECORD_TYPE"
         } > "$id_file"
     fi
 
     echo "正在更新 DNS 到 $WAN_IP ..."
-    response=$(curl -fsS -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
+    # PATCH 只修改指定字段，避免 PUT 省略 proxied 等属性后意外关闭代理。
+    response=$(curl -fsS --connect-timeout 10 --max-time 30 \
+        -X PATCH "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
         -H "X-Auth-Email: $CFUSER" \
         -H "X-Auth-Key: $CFKEY" \
         -H "Content-Type: application/json" \
@@ -769,6 +913,11 @@ maybe_offer_setup() {
         interactive_setup
     fi
 }
+
+if [ "$REPAIR" = true ]; then
+    repair_installation
+    exit 0
+fi
 
 if [ "$MENU" = true ]; then
     show_menu
